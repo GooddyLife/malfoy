@@ -48,6 +48,7 @@ UNFINISHED = re.compile(r"\b(TODO|FIXME|NEEDS STUB|NEEDS CREATION|PLACEHOLDER)\b
 UC = re.compile(r"\bUC-\d+\b")
 TOP_BLOCK = re.compile(r"^([A-Za-z_]\w*)(?:\s+[\w.]+)?\s*:")
 LITERAL_BLOCK = re.compile(r"^(\s*)[\w.\-]+\s*:\s*\|[+-]?\d*\s*$")
+SF_TIMEOUT = int(os.environ.get("MALFOY_SF_TIMEOUT", "120"))  # seconds per sf call
 RECORD_ID = re.compile(r"""["'](0[0-9A-Za-z]{14}(?:[0-9A-Za-z]{3})?)["']""")
 
 
@@ -89,13 +90,23 @@ def text_of(path: str) -> str:
         raise CannotRun(f"cannot read {path}: {exc.strerror}") from exc
 
 
+def json_of(path: Path) -> dict:
+    """A JSON file, or {} if it does not exist. Tolerates a BOM (Windows editors add one)."""
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise CannotRun(f"cannot read {path} as JSON: {exc}") from exc
+
+
 def digest(path: str) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
 def record(state: str, gate: str, ok: bool, inputs: list[str], errors: int, warns: int):
     path = Path(state)
-    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    data = json_of(path)
     data[gate] = {
         "ok": ok, "errors": errors, "warnings": warns,
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -238,17 +249,34 @@ def gate_lint(path: str, final: bool = False) -> Gate:
 
 # ---------------------------------------------------------------- coverage
 
+def tagged_ids(tests: str) -> set[str]:
+    """UC IDs tagged on a live test case: in the comment lines right above an uncommented
+    `- utterance:`, or on the same line. A tag anywhere else (a commented-out case, a
+    note) does not count, or a test that does not run would pass the gate."""
+    tagged, pending = set(), set()
+    for line in tests.splitlines():
+        text = line.strip()
+        if text.startswith("#") and "utterance" not in text:
+            pending |= set(UC.findall(text))
+        elif re.match(r"-\s*utterance\s*:", text):
+            tagged |= pending | set(UC.findall(line))
+            pending = set()
+        elif text:
+            pending = set()
+    return tagged
+
+
 def gate_coverage(spec_path: str, tests_path: str) -> Gate:
     gate, tests = Gate("coverage"), text_of(tests_path)
-    wanted, tested = set(use_case_ids(text_of(spec_path))), set(UC.findall(tests))
+    wanted, tested = set(use_case_ids(text_of(spec_path))), tagged_ids(tests)
     if not wanted:
         gate.error("C1", "the spec has no use case IDs to cover", spec_path)
     cases = len(re.findall(r"^\s*-\s*utterance\s*:", tests, re.M))
     if not cases:
         gate.error("C2", "no `- utterance:` test cases found", tests_path)
     for missing in sorted(wanted - tested):
-        gate.error("C3", f"`{missing}` has no test. Tag a test case with a comment "
-                         f"such as `# {missing}`", tests_path)
+        gate.error("C3", f"`{missing}` has no test. Put `# {missing}` on the line above "
+                         "a test case's `- utterance:`", tests_path)
     for extra in sorted(tested - wanted):
         gate.warn("C4", f"`{extra}` is tested but is not in the spec", tests_path)
     outcomes = len(re.findall(r"^\s*expectedOutcome\s*:", tests, re.M))
@@ -264,8 +292,12 @@ def sf(*args: str) -> dict:
     exe = shutil.which("sf")
     if not exe:
         raise CannotRun("Salesforce CLI (`sf`) is not on PATH")
-    done = subprocess.run([exe, *args, "--json"], capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+    try:
+        done = subprocess.run([exe, *args, "--json"], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=SF_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise CannotRun(f"`sf {' '.join(args[:2])}` gave no answer in {SF_TIMEOUT}s: "
+                        "check the org's auth and the network") from exc
     try:
         data = json.loads(done.stdout)
     except json.JSONDecodeError as exc:
@@ -398,7 +430,7 @@ def recon(repo: str, orgs: bool = True) -> dict:
     project_file = root / "sfdx-project.json"
     if not project_file.is_file():
         raise CannotRun(f"{project_file} not found: not a Salesforce DX project")
-    project = json.loads(project_file.read_text(encoding="utf-8"))
+    project = json_of(project_file)
     kinds = ["aiAuthoringBundles", "bots", "genAiPlannerBundles", "aiEvaluationDefinitions",
              "flows", "classes", "permissionsets"]
     counts, agents = dict.fromkeys(kinds, 0), {"aiAuthoringBundles": [], "bots": []}
@@ -440,8 +472,7 @@ def recon(repo: str, orgs: bool = True) -> dict:
 
 
 def status(state: str, require: list[str]) -> int:
-    path = Path(state)
-    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    data = json_of(Path(state))
     ready = True
     for gate in require + [g for g in data if g not in require]:
         entry = data.get(gate)
