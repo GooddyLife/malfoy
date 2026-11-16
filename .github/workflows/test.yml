@@ -1,6 +1,7 @@
 name: test
 on:
   push:
+    branches: [main]  # branches are tested by their pull request; one run each, not two
   pull_request:
 permissions:
   contents: read
