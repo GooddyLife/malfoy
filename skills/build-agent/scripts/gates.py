@@ -7,7 +7,8 @@
     gates.py lint FILE.agent [--final]       pitfalls the compiler does not report
     gates.py coverage SPEC.md TESTS.yaml     every use case has a test
     gates.py perms FILE.agent -o ORG         the agent user can reach the action targets
-    gates.py active AGENT -o ORG [--version N]   which version is active, from the org
+    gates.py active AGENT -o ORG [--version N]   which version is active, from the org;
+                                             with --state, a pass is logged in releases.json
     gates.py status STATE.json [--require a,b]   what passed, what failed, what went stale
 
 Exit code: 0 pass, 1 fail, 2 could not run. With --state FILE a gate records its
@@ -141,18 +142,65 @@ def locked(state: Path, wait: float = 10.0):
             lock.unlink()
 
 
+def write_json(path: Path, data: dict):
+    """Atomic write; the caller holds the lock. A crash leaves the old file, never half of one."""
+    temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp, path)
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def changed_inputs(folder: Path, inputs: dict[str, str]) -> list[str]:
+    """Inputs missing or different from the recorded hash. Keys are relative to `folder`;
+    absolute keys (0.1.0 state files) still work, since joining keeps an absolute path."""
+    return [p for p, h in inputs.items()
+            if not (folder / p).exists() or digest(folder / p) != h]
+
+
 def record(state: str, gate: str, ok: bool, inputs: list[str], errors: int, warns: int):
     path = Path(state)
     with locked(path):
         data = json_of(path)
-        data[gate] = {
-            "ok": ok, "errors": errors, "warnings": warns,
-            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "inputs": {relative_to(p, path.parent): digest(p) for p in inputs},
-        }
-        temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        os.replace(temp, path)  # a crash mid-write leaves the old file, never half of one
+        data[gate] = {"ok": ok, "errors": errors, "warnings": warns, "at": now(),
+                      "inputs": {relative_to(p, path.parent): digest(p) for p in inputs}}
+        write_json(path, data)
+
+
+def git_head(folder: Path, files: list[str]) -> tuple[str | None, bool]:
+    """(HEAD commit, whether any of `files` has uncommitted changes); (None, False) outside git."""
+    git = shutil.which("git")
+    if not git:
+        return None, False
+    run = lambda *args: subprocess.run([git, *args], cwd=folder, capture_output=True, text=True)
+    head = run("rev-parse", "HEAD")
+    if head.returncode:
+        return None, False
+    return head.stdout.strip(), bool(run("status", "--porcelain", "--", *files).stdout.strip())
+
+
+def record_release(state: str, org: str, version: int) -> str:
+    """Append to releases.json, next to the state file, which inputs shipped as `version` to
+    `org`: the files every recorded gate checked, hashed now, with the commit. Diffing the
+    commits of two releases shows what changed in the spec, the agent and the tests."""
+    path = Path(state)
+    log = path.with_name("releases.json")
+    with locked(path):
+        files = sorted({p for entry in json_of(path).values() for p in entry.get("inputs", {})
+                        if (path.parent / p).exists()})
+    entry = {"org": org, "version": version,
+             "inputs": {p: digest(path.parent / p) for p in files}}
+    commit, dirty = git_head(path.parent, files)
+    with locked(log):
+        releases = json_of(log).get("releases", [])
+        if any(all(old.get(k) == v for k, v in entry.items()) for old in releases):
+            return f"v{version} to {org} with these files is already in {log.name}"
+        releases.append({**entry, "commit": commit, "uncommitted": dirty, "at": now()})
+        write_json(log, {"releases": releases})
+    return (f"recorded v{version} to {org} in {log.name}"
+            + (", with uncommitted changes: the commit alone will not reproduce it" if dirty else ""))
 
 
 # ---------------------------------------------------------------- spec
@@ -427,7 +475,8 @@ def gate_active(agent: str, org: str, version: int | None = None) -> Gate:
     elif version is not None and version not in live:
         gate.error("A3", f"version {version} is not the active one (active: v{live[0]})")
     else:
-        gate.note(f"`{agent}` v{live[0]} is Active in the org "
+        gate.live = version if version is not None else live[0]
+        gate.note(f"`{agent}` v{gate.live} is Active in the org "
                   f"({len(rows)} version(s) in total)")
     return gate
 
@@ -519,14 +568,21 @@ def status(state: str, require: list[str]) -> int:
         entry = data.get(gate)
         if entry is None:
             verdict = "MISSING"
-        elif any(not (path.parent / p).exists() or digest(path.parent / p) != h
-                 for p, h in entry["inputs"].items()):  # absolute keys (0.1.0 files) still work
+        elif changed_inputs(path.parent, entry["inputs"]):
             verdict = "STALE"
         else:
             verdict = "PASS" if entry["ok"] else "FAIL"
         if gate in require and verdict != "PASS":
             ready = False
         print(f"{verdict:8}{gate:10}{entry['at'] if entry else 'never run'}")
+    log = path.with_name("releases.json")
+    with locked(log):
+        releases = json_of(log).get("releases", [])
+    latest = {release["org"]: release for release in releases}  # the log is in time order
+    for org, release in latest.items():  # informational: drift is not a failed gate
+        changed = changed_inputs(path.parent, release["inputs"])
+        print(f"{'DRIFT' if changed else 'SHIPPED':8}{org:10}v{release['version']} "
+              f"{release['at']}" + (f"  changed since: {', '.join(changed)}" if changed else ""))
     print("READY: every required gate passed on the current files" if ready else
           "NOT READY: fix the gates above, then run them again")
     return 0 if ready else 1
@@ -567,7 +623,11 @@ def main(argv: list[str] | None = None) -> int:
         if a.gate == "perms":
             return gate_perms(a.agent, a.org).finish(a.state, [a.agent])
         if a.gate == "active":
-            return gate_active(a.agent, a.org, a.version).finish(a.state, [])
+            gate = gate_active(a.agent, a.org, a.version)
+            code = gate.finish(a.state, [])
+            if code == 0 and a.state:
+                print(f"NOTE  active  {record_release(a.state, a.org, gate.live)}")
+            return code
         return status(a.state, [g for g in a.require.split(",") if g])
     except CannotRun as exc:
         print(f"CANNOT RUN  {a.gate}  {exc}", file=sys.stderr)

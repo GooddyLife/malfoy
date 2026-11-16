@@ -3,12 +3,14 @@
 Each test breaks the passing example in one way and checks that the right gate
 says so. The org gates (perms, active) get faked SOQL answers: no org is needed.
 """
+import io
 import json
 import shutil
 import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -204,6 +206,57 @@ class OrgGatesTest(unittest.TestCase):
         self.assertEqual(codes(rows, version=3), {"A3"})
         self.assertEqual(codes([rows[0]]), {"A2"})
         self.assertEqual(codes([]), {"A1"})
+
+
+class ReleaseLogTest(unittest.TestCase):
+    """`active` with --state records which inputs shipped with which org version (#1)."""
+
+    def setUp(self):
+        original = gates.soql
+        self.addCleanup(setattr, gates, "soql", original)
+        gates.soql = FakeOrg(BotVersion=[{"VersionNumber": 2, "Status": "Active"}])
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        folder = Path(self.dir.name)
+        for name, text in (("spec.md", SPEC), ("a.agent", AGENT), ("tests.yaml", TESTS)):
+            (folder / name).write_text(text, encoding="utf-8")
+        self.folder, self.state = folder, str(folder / "state.json")
+        quiet = io.StringIO()
+        with redirect_stdout(quiet):
+            gates.main(["spec", str(folder / "spec.md"), "--state", self.state])
+            gates.main(["lint", str(folder / "a.agent"), "--state", self.state])
+            gates.main(["coverage", str(folder / "spec.md"), str(folder / "tests.yaml"),
+                        "--state", self.state])
+
+    def run_gate(self, *args) -> tuple[int, str]:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = gates.main(list(args))
+        return code, out.getvalue()
+
+    def releases(self) -> list:
+        log = self.folder / "releases.json"
+        return json.loads(log.read_text())["releases"] if log.exists() else []
+
+    def test_pass_records_once_and_fail_records_nothing(self):
+        self.assertEqual(self.run_gate("active", "OrderStatus", "-o", "fake", "--state",
+                                       self.state)[0], 0)
+        entry, = self.releases()
+        self.assertEqual((entry["org"], entry["version"]), ("fake", 2))
+        self.assertEqual(sorted(entry["inputs"]), ["a.agent", "spec.md", "tests.yaml"])
+        self.assertIn("commit", entry)
+        self.run_gate("active", "OrderStatus", "-o", "fake", "--state", self.state)
+        self.assertEqual(len(self.releases()), 1)  # same org, version and files: no duplicate
+        code, _ = self.run_gate("active", "OrderStatus", "-o", "fake", "--version", "3",
+                                "--state", self.state)
+        self.assertEqual((code, len(self.releases())), (1, 1))
+
+    def test_status_shows_drift_from_the_last_release(self):
+        self.run_gate("active", "OrderStatus", "-o", "fake", "--state", self.state)
+        self.assertIn("SHIPPED fake      v2", self.run_gate("status", self.state)[1])
+        (self.folder / "spec.md").write_text(SPEC + "\nchanged\n", encoding="utf-8")
+        _, out = self.run_gate("status", self.state)
+        self.assertRegex(out, r"DRIFT\s+fake\s+v2 .*changed since: spec\.md")
 
 
 if __name__ == "__main__":

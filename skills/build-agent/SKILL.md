@@ -38,8 +38,8 @@ If `${CLAUDE_SKILL_DIR}` shows up unresolved, the script is at `scripts/gates.py
 | `lint FILE.agent` | pitfalls the compiler does not report (codes L1 to L7). `--final`: unfinished markers become errors | the `.agent` |
 | `coverage SPEC.md TESTS.yaml` | every `UC-nn` in the spec is tagged on a test case | spec and tests |
 | `perms FILE.agent -o ORG` | the agent user exists, is active, can reach every Apex target, every Flow target exists and is active | an authenticated org |
-| `active AGENT -o ORG` | which version is `Active`, read from the org. `--version N` to require one | an authenticated org |
-| `status STATE.json` | what passed, failed, never ran, or went `STALE` because its input changed. `--require a,b,c` | the state file |
+| `active AGENT -o ORG` | which version is `Active`, read from the org. `--version N` to require one. With `--state`, a pass appends to `releases.json` which files shipped as that version, with the commit | an authenticated org |
+| `status STATE.json` | what passed, failed, never ran, or went `STALE` because its input changed. `--require a,b,c`. Also the last release per org: `SHIPPED`, or `DRIFT` with the files changed since | the state file |
 
 Exit code 0 is pass, 1 is fail, 2 means the gate could not run (say so; it is not a pass). When a gate fails, fix the cause and run it again. Do not argue with it, and do not move on with a `STALE` gate.
 
@@ -56,7 +56,7 @@ Exit code 0 is pass, 1 is fail, 2 means the gate could not run (say so; it is no
 | 6 | Release | `agentforce-generate` | `status`, `spec --final`, `lint --final`, then `perms` and `active` per org |
 | 7 | Observe | `agentforce-observe`, `agentforce-d360-analyze` | optional |
 
-Keep every artifact of one agent in `.malfoy/<AgentApiName>/`: `spec.md`, `tests.yaml`, `state.json`.
+Keep every artifact of one agent in `.malfoy/<AgentApiName>/`: `spec.md`, `tests.yaml`, `state.json`, `releases.json`. Unless the repo's rules say otherwise, suggest committing the folder with the agent: the commits in `releases.json` then show what changed in the spec between any two versions.
 
 ### Phase 0: set up and read the repo
 
@@ -98,7 +98,7 @@ Run `status --require spec,lint,coverage,perms`, then `spec --final` and `lint -
 2. Show the org, the agent and the version, and get approval as the repo's rules require (always for production).
 3. Before a production activation, note the version that is active now. That is the rollback.
 4. Publish and activate following "Deploy, Publish, and Activate" in `agentforce-generate`.
-5. Run `active` and show its output. Only then say it is active.
+5. Run `active` with `--version N --state` and show its output. Only then say it is active. The pass records the release in `releases.json`; if it says there were uncommitted changes, tell the user the commit alone will not reproduce that version.
 
 ### Phase 7: observe
 
