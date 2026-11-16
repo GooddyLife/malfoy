@@ -133,8 +133,8 @@ One file, standard library only, Python 3.9+. It reads; it never writes to an or
 | `lint` | the `.agent` has a pitfall the compiler stays quiet about: no declared locale, a user ID where a username belongs, a service agent with no agent user. Warns on `#` lines inside a `\|` block (they are prompt text, not comments) and hardcoded record IDs |
 | `coverage` | a use case in the spec has no test tagged with its ID |
 | `perms` | the agent user is missing or inactive, cannot reach an Apex class an action targets, or a Flow target is missing or has no active version |
-| `active` | the agent has no active version in the org, or not the one you expected |
-| `status` | any required gate failed, never ran, or passed on a file that has changed since |
+| `active` | the agent has no active version in the org, or not the one you expected. On a pass it records which spec, tests and agent file shipped as that version, with the commit |
+| `status` | any required gate failed, never ran, or passed on a file that has changed since. Also shows, per org, whether the files still match the last release (`SHIPPED`) or have moved on (`DRIFT`) |
 
 Real output, from [`examples/order-status`](examples/order-status):
 

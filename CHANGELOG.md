@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Release log (#1): with `--state`, a passing `active` appends to `releases.json` the org, the version, the hash of every file the recorded gates checked, the git commit and whether those files had uncommitted changes. `status` shows the last release per org as `SHIPPED`, or `DRIFT` with the files changed since. `git diff <commit> <commit> -- spec.md` then shows what changed in the contract between two versions.
+- CI runs on push only for `main`; branches are tested by their pull request.
 - `coverage` counts a `# UC-nn` tag only when it sits on a live test case: the comment lines right above an uncommented `- utterance:`, or that line itself. A tag on a commented-out case or in a note used to pass the gate.
 - `recon` and `status` read JSON with a BOM, and a corrupt state file is exit 2 (could not run) instead of a traceback.
 - Calls to `sf` time out after 120 s (`MALFOY_SF_TIMEOUT`) instead of hanging the gate.
