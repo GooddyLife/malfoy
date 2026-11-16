@@ -47,7 +47,7 @@ On first use he checks that the `agentforce-*` skills from [forcedotcom/sf-skill
 Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.com/forcedotcom/sf-skills). They do the building. This is what changes when someone conducts them.
 
 <p align="center">
-  <img src="assets/comparison.svg" width="100%" alt="Ten differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below.">
+  <img src="assets/comparison.svg" width="100%" alt="Eleven differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below.">
 </p>
 
 <details>
@@ -64,6 +64,7 @@ Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.co
 | **What the compiler stays quiet about** | Reference pages to read | `lint`: seven rules, with file and line |
 | **"It's active"** | A query in the docs | `active`, pass or fail, before he says the word |
 | **A file edited after its check passed** | Nothing records it | `STALE` |
+| **Which spec shipped as which version** | The spec is saved in the project; nothing ties it to the version published | `active` records the version, the hash of the spec, tests and agent, and the commit. `status` shows `DRIFT` |
 | **Your repo's deploy and approval rules** | Not looked for | Read first. They override his |
 
 </details>
@@ -171,10 +172,10 @@ You can run the gates without Malfoy, in CI or by hand. He would approve.
 
 ## Status
 
-Version 0.1. What has been checked, and what has not:
+Version 0.2 ([changelog](CHANGELOG.md)). What has been checked, and what has not:
 
 - **Checked:** the gates have unit tests that run on Linux, macOS and Windows on every push. Each test breaks the example in one way and expects the right gate to say so.
-- **Checked:** `perms` and `active` were run against a real sandbox, read-only, including the failing paths.
+- **Checked:** `perms` and `active` were run against a real sandbox, read-only, including the failing paths. Their logic is also unit-tested with faked org answers.
 - **Checked:** the example `.agent` compiles with no diagnostics on the Agent Script compiler 2.9.27.
 - **Not yet:** a complete run recorded from discovery to a production activation. The org steps in the example are described, not recorded.
 - **Not checked by any gate:** field and object permissions for what each action reads or writes. `perms` says so every time it runs.
