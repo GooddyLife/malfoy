@@ -162,6 +162,8 @@ You can run the gates without Malfoy, in CI or by hand. He would approve.
 
 [`examples/order-status`](examples/order-status) follows one small agent through the phases: the request, the questions, the spec, the Agent Script, the tests, and the output of each gate. The store, the customers and the orders in it are made up.
 
+[`examples/recorded-run`](examples/recorded-run) is the same playbook run for real, in a Salesforce sandbox, on an existing agent: every command and its output, including the gates that failed and what fixed them.
+
 ## What he refuses to do
 
 - Activate anything in production without your yes, naming the agent and the version.
@@ -177,7 +179,8 @@ Version 0.2 ([changelog](CHANGELOG.md)). What has been checked, and what has not
 - **Checked:** the gates have unit tests that run on Linux, macOS and Windows on every push. Each test breaks the example in one way and expects the right gate to say so.
 - **Checked:** `perms` and `active` were run against a real sandbox, read-only, including the failing paths. Their logic is also unit-tested with faked org answers.
 - **Checked:** the example `.agent` compiles with no diagnostics on the Agent Script compiler 2.9.27.
-- **Not yet:** a complete run recorded from discovery to a production activation. The org steps in the example are described, not recorded.
+- **Checked:** [a recorded run in a real sandbox](examples/recorded-run): an existing agent taken through every phase to published and active, then removed. The gates caught a handoff promise with no action behind it, a persona at 44/100 and an agent user with no access to the action's Apex class.
+- **Not yet:** a recorded run that ends in a production activation.
 - **Not checked by any gate:** field and object permissions for what each action reads or writes. `perms` says so every time it runs.
 
 No gate can promise an agent with no problems in production. They remove the failures that are known and checkable; how the model behaves with real users is what phase 7 is for.

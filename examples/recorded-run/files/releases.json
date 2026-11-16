@@ -1,0 +1,16 @@
+{
+  "releases": [
+    {
+      "org": "sandbox",
+      "version": 1,
+      "inputs": {
+        "../../force-app/main/default/aiAuthoringBundles/Malfoy_Demo_Protocolo/Malfoy_Demo_Protocolo.agent": "560bd64a8432975d",
+        "spec.md": "c34b6a75f9c80ab9",
+        "tests.yaml": "b698570cc2d266eb"
+      },
+      "commit": "2e918a73a4b2cfb595167bd0ec204a60bf0ec276",
+      "uncommitted": false,
+      "at": "2026-11-16T22:51:50+00:00"
+    }
+  ]
+}
