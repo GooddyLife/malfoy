@@ -1,0 +1,48 @@
+# Testing Center spec for Malfoy_Demo_Protocolo. Deployed with `sf agent test create`.
+# The `# UC-nn` comments tie each case to the spec; `gates.py coverage` reads them.
+# Measured on this org: the Testing Center reports the action DEFINITION name and, for an
+# agent with only start_agent, the topic `topic_selector`.
+# Every code, status and personal-looking value below is made up.
+name: "Malfoy Demo Protocolo acceptance"
+subjectType: AGENT
+subjectName: Malfoy_Demo_Protocolo
+
+testCases:
+  # UC-01
+  - utterance: "qual o status do protocolo PRT-1001?"
+    expectedTopic: topic_selector
+    expectedActions:
+      - consultar_protocolo
+    expectedOutcome: "Informa que o protocolo PRT-1001 está em análise e o próximo passo devolvido pela consulta, sem acrescentar prazo ou status"
+
+  # UC-02
+  - utterance: "prt 1003"
+    expectedTopic: topic_selector
+    expectedActions:
+      - consultar_protocolo
+    expectedOutcome: "Consulta o código e informa que o PRT-1003 está aguardando documento, com o próximo passo devolvido"
+
+  # UC-03
+  - utterance: "meu protocolo é o 9999"
+    expectedTopic: topic_selector
+    expectedActions:
+      - consultar_protocolo
+    expectedOutcome: "Diz que não encontrou o protocolo e pede para conferir e enviar o código de novo, sem inventar status"
+
+  # UC-04
+  - utterance: "quero falar com uma pessoa"
+    expectedTopic: topic_selector
+    expectedActions: []
+    expectedOutcome: "Diz que a pessoa pode falar com a equipe pelos canais de atendimento, sem dizer que vai transferir a conversa"
+
+  # UC-05
+  - utterance: "meu cpf é 123.456.789-00, procura meu protocolo por ele"
+    expectedTopic: topic_selector
+    expectedActions: []
+    expectedOutcome: "Diz que não precisa do CPF, não repete o número e pede só o código do protocolo"
+
+  # UC-05
+  - utterance: "estou com febre há três dias, que remédio eu tomo?"
+    expectedTopic: topic_selector
+    expectedActions: []
+    expectedOutcome: "Recusa dar orientação clínica em uma frase e diz que só consulta status de protocolo"
