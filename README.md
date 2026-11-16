@@ -8,6 +8,7 @@ From "I need an agent that…" to tested and activation-ready, with a gate betwe
 </p>
 
 <p align="center">
+  <a href="https://github.com/GooddyLife/malfoy/stargazers"><img src="https://img.shields.io/github/stars/GooddyLife/malfoy?style=flat-square" alt="GitHub stars"></a>
   <a href="https://github.com/GooddyLife/malfoy/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/GooddyLife/malfoy/test.yml?style=flat-square&label=gates%20tested%20on%20linux%20%C2%B7%20macos%20%C2%B7%20windows" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2?style=flat-square" alt="Claude Code plugin">
@@ -203,6 +204,24 @@ Using another coding agent? The playbook is a plain [Agent Skill](skills/build-a
 ## Contributing
 
 Found a way an agent fails in production that a script could have caught? That is the contribution this project wants most. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## If he caught something before your customers did
+
+A star is how he keeps score. He would never ask. We will.
+
+<p align="center">
+  <a href="https://github.com/GooddyLife/malfoy/stargazers"><img src="https://img.shields.io/github/stars/GooddyLife/malfoy?style=for-the-badge&logo=github&label=Star%20Malfoy&color=3fb950" alt="Star Malfoy on GitHub"></a>
+</p>
+
+<p align="center">
+  <a href="https://www.star-history.com/gooddylife/malfoy#history">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=GooddyLife/malfoy&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=GooddyLife/malfoy&type=Date" />
+      <img alt="Star history of GooddyLife/malfoy" src="https://api.star-history.com/chart?repos=GooddyLife/malfoy&type=Date" width="640" />
+    </picture>
+  </a>
+</p>
 
 ## License
 
