@@ -45,6 +45,13 @@ On first use he checks that the `agentforce-*` skills from [forcedotcom/sf-skill
 
 Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.com/forcedotcom/sf-skills). They do the building. This is what changes when someone conducts them.
 
+<p align="center">
+  <img src="assets/comparison.svg" width="100%" alt="Ten differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below.">
+</p>
+
+<details>
+<summary>The same comparison as a table, with the full wording</summary>
+
 | | The official skills on their own | The same skills, conducted by Malfoy |
 |---|---|---|
 | **Where you start** | Nine skills. You choose which one, and when | One entry point, eight phases, a fixed order |
@@ -57,6 +64,8 @@ Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.co
 | **"It's active"** | A query in the docs | `active`, pass or fail, before he says the word |
 | **A file edited after its check passed** | Nothing records it | `STALE` |
 | **Your repo's deploy and approval rules** | Not looked for | Read first. They override his |
+
+</details>
 
 <sub>Compared against forcedotcom/sf-skills at commit <code>788b83f</code> (v1.70.0) on 16 Nov 2026. <a href="docs/comparison.md">How each row was checked.</a> This compares what is enforced, it is not a benchmark of results. The official skills do everything that actually builds the agent: the Agent Script, the persona, the tests, the observability. Malfoy writes none of that.</sub>
 
