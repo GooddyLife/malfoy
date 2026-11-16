@@ -38,11 +38,11 @@ A deploy that reports success does not mean the version is active, and some acti
 
 ```sql
 SELECT VersionNumber, Status FROM BotVersion
-WHERE BotDefinitionId IN (SELECT Id FROM BotDefinition WHERE DeveloperName = 'YourAgent')
+WHERE BotDefinition.DeveloperName = 'YourAgent'
 ORDER BY VersionNumber DESC
 ```
 
-Filtering by `Bot.DeveloperName` fails with an invalid relationship error, and the Tooling API does not expose `BotVersion`; the subquery form above works on the standard API. `gates.py active` runs it.
+The relationship is `BotDefinition`, not `Bot` (that one fails with an invalid relationship error), and the Tooling API does not expose `BotVersion`; use the standard API. `gates.py active` runs the check and fails when no version, or not the expected one, is `Active`.
 
 ## Flows called by the agent must be active
 

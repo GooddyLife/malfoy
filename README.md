@@ -41,16 +41,24 @@ and tell him what you need. Already in a session? `/malfoy:build-agent` runs the
 
 On first use he checks that the `agentforce-*` skills from [forcedotcom/sf-skills](https://github.com/forcedotcom/sf-skills) are installed, and offers to install them if they are not.
 
-## What changes
+## The official skills, with and without him
 
-| Asking an assistant to "build me an agent" | Asking Malfoy |
-|---|---|
-| An `.agent` file, in one shot | Questions first, then a spec you approve. The spec is the contract |
-| "I tested it" | `coverage`: every use case in the spec has a test, or nothing moves |
-| Works for the admin who built it, fails silently for the user the agent runs as | `perms` checks the agent user against every action target, in the org |
-| "It's active" | `active` reads the version back from the org |
-| A file edited after the tests passed | `STALE`. The gate knows |
-| Your repo's deploy rules, ignored | Read first. They override his |
+Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.com/forcedotcom/sf-skills). They do the building. This is what changes when someone conducts them.
+
+| | The official skills on their own | The same skills, conducted by Malfoy |
+|---|---|---|
+| **Where you start** | Nine skills. You choose which one, and when | One entry point, eight phases, a fixed order |
+| **Persona** | A separate skill that the build skill never mentions | Phase 3. Not skipped |
+| **When a phase is done** | When the model judges it so: "do not proceed through a blocking result" | When a script exits 0 |
+| **The spec** | Purpose, behaviour, subagents, actions | The same, plus success metric, out of scope, handoff, data and privacy, environments. Rejected while a section is empty or nothing says what the agent must refuse |
+| **Tests against the spec** | "Test coverage maps against it", in prose | Use cases have IDs. `coverage` names the one with no test |
+| **The user the agent runs as** | A setup guide, with queries to run | `perms` checks that user's access to every Apex class the agent calls, in the org |
+| **What the compiler stays quiet about** | Reference pages to read | `lint`: seven rules, with file and line |
+| **"It's active"** | A query in the docs | `active`, pass or fail, before he says the word |
+| **A file edited after its check passed** | Nothing records it | `STALE` |
+| **Your repo's deploy and approval rules** | Not looked for | Read first. They override his |
+
+<sub>Compared against forcedotcom/sf-skills at commit <code>788b83f</code> (v1.70.0) on 16 Nov 2026. <a href="docs/comparison.md">How each row was checked.</a> This compares what is enforced, it is not a benchmark of results. The official skills do everything that actually builds the agent: the Agent Script, the persona, the tests, the observability. Malfoy writes none of that.</sub>
 
 ## How it works
 
