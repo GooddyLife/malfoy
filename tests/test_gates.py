@@ -4,9 +4,11 @@ Each test breaks the passing example in one way and checks that the right gate
 says so. The org gates (perms, active) get faked SOQL answers: no org is needed.
 """
 import json
+import shutil
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -103,6 +105,29 @@ class GatesTest(unittest.TestCase):
         Path(spec).write_text(SPEC + "\nchanged\n", encoding="utf-8")
         self.assertEqual(gates.status(state, ["spec"]), 1)
         self.assertEqual(gates.status(state, ["spec", "lint"]), 1)  # lint never ran
+
+    def test_state_survives_a_move_and_a_line_ending_change(self):
+        folder = Path(self.dir.name) / "repo" / ".malfoy" / "OrderStatus"
+        folder.mkdir(parents=True)
+        spec, state = folder / "spec.md", folder / "state.json"
+        spec.write_bytes(SPEC.encode("utf-8"))
+        gates.gate_spec(str(spec)).finish(str(state), [str(spec)])
+        self.assertEqual(list(json.loads(state.read_text())["spec"]["inputs"]), ["spec.md"])
+        moved = Path(self.dir.name) / "clone"  # another machine, another checkout path
+        shutil.copytree(Path(self.dir.name) / "repo", moved)
+        copy = moved / ".malfoy" / "OrderStatus"
+        (copy / "spec.md").write_bytes(SPEC.replace("\n", "\r\n").encode("utf-8"))  # autocrlf
+        self.assertEqual(gates.status(str(copy / "state.json"), ["spec"]), 0)
+
+    def test_parallel_gates_do_not_lose_results(self):
+        spec, state = self.file("spec.md", SPEC), str(Path(self.dir.name) / "state.json")
+        def run(n):
+            gate = gates.gate_spec(spec)
+            gate.name = f"g{n}"
+            gate.finish(state, [spec])
+        with ThreadPoolExecutor(16) as pool:
+            list(pool.map(run, range(32)))
+        self.assertEqual(len(json.loads(Path(state).read_text())), 32)
 
     def test_recon_reads_a_dx_project(self):
         root = Path(self.dir.name)

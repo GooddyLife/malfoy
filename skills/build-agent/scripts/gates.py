@@ -24,6 +24,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -100,20 +102,57 @@ def json_of(path: Path) -> dict:
         raise CannotRun(f"cannot read {path} as JSON: {exc}") from exc
 
 
-def digest(path: str) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+def digest(path: str | Path) -> str:
+    """Hash of the file with CRLF read as LF, so a checkout with core.autocrlf is not a change."""
+    return hashlib.sha256(Path(path).read_bytes().replace(b"\r\n", b"\n")).hexdigest()[:16]
+
+
+def relative_to(path: str, folder: Path) -> str:
+    """`path` relative to `folder` with `/`, so a committed state file works on any clone."""
+    try:
+        return Path(os.path.relpath(Path(path).resolve(), folder.resolve())).as_posix()
+    except ValueError:  # another drive on Windows: no relative path exists
+        return str(Path(path).resolve())
+
+
+@contextmanager
+def locked(state: Path, wait: float = 10.0):
+    """Serialise access to the state file across processes. Gates may run in parallel, and
+    a read-modify-write without this loses results or reads a half-written file."""
+    lock = state.with_name(state.name + ".lock")
+    state.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except (FileExistsError, PermissionError):  # Windows: PermissionError while it is being deleted
+            # ponytail: age-based stale-lock break; fine while a holder needs milliseconds
+            with suppress(OSError):
+                if time.time() - lock.stat().st_mtime > wait:
+                    lock.unlink()  # left behind by a run that crashed
+            if time.monotonic() > deadline:
+                raise CannotRun(f"{lock} is held by another run; delete it if none is running")
+            time.sleep(0.02)
+    try:
+        yield
+    finally:
+        with suppress(FileNotFoundError):
+            lock.unlink()
 
 
 def record(state: str, gate: str, ok: bool, inputs: list[str], errors: int, warns: int):
     path = Path(state)
-    data = json_of(path)
-    data[gate] = {
-        "ok": ok, "errors": errors, "warnings": warns,
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "inputs": {str(Path(p).resolve()): digest(p) for p in inputs},
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    with locked(path):
+        data = json_of(path)
+        data[gate] = {
+            "ok": ok, "errors": errors, "warnings": warns,
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "inputs": {relative_to(p, path.parent): digest(p) for p in inputs},
+        }
+        temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp, path)  # a crash mid-write leaves the old file, never half of one
 
 
 # ---------------------------------------------------------------- spec
@@ -472,13 +511,16 @@ def recon(repo: str, orgs: bool = True) -> dict:
 
 
 def status(state: str, require: list[str]) -> int:
-    data = json_of(Path(state))
+    path = Path(state)
+    with locked(path):
+        data = json_of(path)
     ready = True
     for gate in require + [g for g in data if g not in require]:
         entry = data.get(gate)
         if entry is None:
             verdict = "MISSING"
-        elif any(not Path(p).exists() or digest(p) != h for p, h in entry["inputs"].items()):
+        elif any(not (path.parent / p).exists() or digest(path.parent / p) != h
+                 for p, h in entry["inputs"].items()):  # absolute keys (0.1.0 files) still work
             verdict = "STALE"
         else:
             verdict = "PASS" if entry["ok"] else "FAIL"
