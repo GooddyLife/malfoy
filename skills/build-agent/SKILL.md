@@ -4,7 +4,7 @@ description: Guides building a Salesforce Agentforce agent end to end, from prod
 license: MIT
 metadata:
   author: GooddyLife
-  version: 0.1.0
+  version: 0.2.0
 ---
 
 # Build an Agentforce agent, end to end

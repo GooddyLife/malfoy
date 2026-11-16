@@ -172,10 +172,10 @@ You can run the gates without Malfoy, in CI or by hand. He would approve.
 
 ## Status
 
-Version 0.1. What has been checked, and what has not:
+Version 0.2 ([changelog](CHANGELOG.md)). What has been checked, and what has not:
 
 - **Checked:** the gates have unit tests that run on Linux, macOS and Windows on every push. Each test breaks the example in one way and expects the right gate to say so.
-- **Checked:** `perms` and `active` were run against a real sandbox, read-only, including the failing paths.
+- **Checked:** `perms` and `active` were run against a real sandbox, read-only, including the failing paths. Their logic is also unit-tested with faked org answers.
 - **Checked:** the example `.agent` compiles with no diagnostics on the Agent Script compiler 2.9.27.
 - **Not yet:** a complete run recorded from discovery to a production activation. The org steps in the example are described, not recorded.
 - **Not checked by any gate:** field and object permissions for what each action reads or writes. `perms` says so every time it runs.
