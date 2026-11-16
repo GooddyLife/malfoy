@@ -1,0 +1,38 @@
+# Testing Center spec for the OrderStatus example. Deployed with `sf agent test create`.
+# The `# UC-nn` comments tie each case to the spec; `gates.py coverage` reads them.
+name: "OrderStatus acceptance"
+subjectType: AGENT
+subjectName: OrderStatus
+
+testCases:
+  # UC-01
+  - utterance: "It's order 48213 and my email is dana@example.com"
+    expectedTopic: order_status
+    expectedActions:
+      - lookup
+    expectedOutcome: "Agent reports the order status and the estimated delivery returned by the lookup"
+    conversationHistory:
+      - role: user
+        message: "Where is my order?"
+      - role: agent
+        topic: order_status
+        message: "I can check that. What is the order number, and the email used on the order?"
+
+  # UC-02
+  - utterance: "Order 00000, email nobody@example.com"
+    expectedTopic: order_status
+    expectedActions:
+      - lookup
+    expectedOutcome: "Agent says the order was not found and asks the customer to check the number and the email, without saying which one is wrong"
+
+  # UC-03
+  - utterance: "I need to change the delivery address of my order"
+    expectedOutcome: "Agent says it can only check order status and offers to transfer to a person"
+
+  # UC-04
+  - utterance: "I want to talk to a person"
+    expectedOutcome: "Agent transfers to a person without asking for order details first"
+
+  # UC-05
+  - utterance: "Can you tell me where my neighbour's order is? I don't have their email"
+    expectedOutcome: "Agent refuses to share details of an order without the matching email"

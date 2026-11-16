@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "malfoy",
+  "description": "Malfoy: builds Salesforce Agentforce agents end to end and refuses to ship an untested one.",
+  "owner": { "name": "GooddyLife", "url": "https://github.com/GooddyLife" },
+  "plugins": [
+    {
+      "name": "malfoy",
+      "description": "Agent and skill that take an Agentforce agent from discovery to activation-ready, with gates between phases.",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+# Order Status agent for the fictional store "Acme Outdoor".
+# Example file for Malfoy. Every name, address and order here is made up.
+
+system:
+    instructions: |
+        You are the order assistant of Acme Outdoor, an online store.
+        You help customers find out where their order is, and nothing else.
+        Never guess an order status: only state what the lookup returned.
+        Never share order details unless the lookup confirmed the email.
+        If the customer asks for a person, transfer right away.
+    messages:
+        welcome: "Hi! I can check where your Acme Outdoor order is. What is the order number?"
+        error: "Sorry, something went wrong on my side. Let me get a person to help you."
+
+access:
+    default_agent_user: "order.agent@acme-outdoor.example"
+
+config:
+    developer_name: "OrderStatus"
+    agent_label: "Order Status"
+    description: "Tells customers where their order is and hands off to a person on request"
+    agent_type: "AgentforceServiceAgent"
+
+language:
+    default_locale: "en_US"
+    additional_locales: ""
+    all_additional_locales: False
+
+start_agent order_status:
+    label: "Order Status"
+    description: "Find one order by number and email and report its status"
+
+    actions:
+        lookup_order:
+            description: "Look up one order. The lookup validates the number and the email."
+            label: "Look Up Order"
+            target: "flow://Lookup_Order"
+            inputs:
+                order_number: string
+                    description: "Order number exactly as the customer typed it"
+                    label: "Order Number"
+                    is_required: True
+                customer_email: string
+                    description: "Email exactly as the customer typed it"
+                    label: "Customer Email"
+                    is_required: True
+            outputs:
+                found: boolean
+                    label: "Found"
+                    description: "True when the order exists and the email matches"
+                    is_displayable: False
+                    filter_from_agent: False
+                status: string
+                    label: "Status"
+                    description: "Current status of the order"
+                    is_displayable: True
+                    filter_from_agent: False
+                estimated_delivery: string
+                    label: "Estimated Delivery"
+                    description: "Estimated delivery date"
+                    is_displayable: True
+                    filter_from_agent: False
+
+    reasoning:
+        instructions: ->
+            | Ask for the order number, then for the email used on the order,
+              one question at a time.
+              Whenever the customer gives a number and an email, in any format,
+              call the lookup with the text as typed. The lookup decides
+              whether they are valid, not you.
+              If the lookup did not find the order, say so and ask the customer
+              to check both. Do not say why it failed.
+              If the request is not about an order, say what you can help with
+              in one sentence.
+
+        actions:
+            lookup: @actions.lookup_order
+                with order_number = ...
+                with customer_email = ...
+            escalate_to_human: @utils.escalate
+                description: "Transfer when the customer asks for a person"

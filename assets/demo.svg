@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 450" width="880" height="450" role="img" aria-label="Malfoy taking an Agentforce agent through its gates: doctor, spec and lint pass, coverage fails because one use case has no test, then every gate passes and the agent is ready.">
+<style>
+.row{font:15px ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;fill:#c9d1d9;opacity:0;white-space:pre}
+.cmd{fill:#8b949e}.user{fill:#e6edf3}.pass{fill:#3fb950}.fail{fill:#f85149}.ready{fill:#3fb950;font-weight:700}
+.name{fill:#aeb9b3;font-weight:700}.say{fill:#d0d7de;font-style:italic}
+@keyframes k0{0%,3.00%{opacity:0}4.75%,96%{opacity:1}100%{opacity:0}}.r0{animation:k0 20s linear infinite}@keyframes k1{0%,9.00%{opacity:0}10.75%,96%{opacity:1}100%{opacity:0}}.r1{animation:k1 20s linear infinite}@keyframes k2{0%,17.00%{opacity:0}18.75%,96%{opacity:1}100%{opacity:0}}.r2{animation:k2 20s linear infinite}@keyframes k3{0%,22.00%{opacity:0}23.75%,96%{opacity:1}100%{opacity:0}}.r3{animation:k3 20s linear infinite}@keyframes k4{0%,28.00%{opacity:0}29.75%,96%{opacity:1}100%{opacity:0}}.r4{animation:k4 20s linear infinite}@keyframes k5{0%,35.00%{opacity:0}36.75%,96%{opacity:1}100%{opacity:0}}.r5{animation:k5 20s linear infinite}@keyframes k6{0%,41.00%{opacity:0}42.75%,96%{opacity:1}100%{opacity:0}}.r6{animation:k6 20s linear infinite}@keyframes k7{0%,47.00%{opacity:0}48.75%,96%{opacity:1}100%{opacity:0}}.r7{animation:k7 20s linear infinite}@keyframes k8{0%,53.00%{opacity:0}54.75%,96%{opacity:1}100%{opacity:0}}.r8{animation:k8 20s linear infinite}@keyframes k9{0%,62.00%{opacity:0}63.75%,96%{opacity:1}100%{opacity:0}}.r9{animation:k9 20s linear infinite}@keyframes k10{0%,67.00%{opacity:0}68.75%,96%{opacity:1}100%{opacity:0}}.r10{animation:k10 20s linear infinite}@keyframes k11{0%,73.00%{opacity:0}74.75%,96%{opacity:1}100%{opacity:0}}.r11{animation:k11 20s linear infinite}@keyframes k12{0%,80.00%{opacity:0}81.75%,96%{opacity:1}100%{opacity:0}}.r12{animation:k12 20s linear infinite}
+@media (prefers-reduced-motion:reduce){.row{animation:none!important;opacity:1}}
+</style>
+<rect width="880" height="450" rx="10" fill="#0d1117"/>
+<rect x=".5" y=".5" width="879" height="449" rx="10" fill="none" stroke="#30363d"/>
+<circle cx="24" cy="24" r="6" fill="#f85149"/><circle cx="44" cy="24" r="6" fill="#d29922"/><circle cx="64" cy="24" r="6" fill="#3fb950"/>
+<text x="440.0" y="29" text-anchor="middle" style="font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#8b949e">malfoy</text>
+<line x1="0" y1="46" x2="880" y2="46" stroke="#30363d"/>
+<text class="row cmd r0" x="28" y="78">$ claude --agent malfoy</text>
+<text class="row user r1" x="28" y="104">&gt; I need an agent that tells customers where their order is.</text>
+<text class="row r2" x="28" y="130"><tspan class="name">malfoy</tspan><tspan class="say" dx="14">Phase 0. I read the repository before I have opinions.</tspan></text>
+<text class="row pass r3" x="28" y="156">PASS  doctor    0 error(s), 0 warning(s)</text>
+<text class="row r4" x="28" y="182"><tspan class="name">malfoy</tspan><tspan class="say" dx="14">Phase 1. Five questions, then a spec you approve.</tspan></text>
+<text class="row pass r5" x="28" y="208">PASS  spec      0 error(s), 0 warning(s)</text>
+<text class="row pass r6" x="28" y="234">PASS  lint      0 error(s), 0 warning(s)</text>
+<text class="row fail r7" x="28" y="260">FAIL  coverage  C3  `UC-04` has no test.</text>
+<text class="row r8" x="28" y="286"><tspan class="name">malfoy</tspan><tspan class="say" dx="14">Nobody tested &quot;I want to talk to a person&quot;. We are not shipping that.</tspan></text>
+<text class="row pass r9" x="28" y="312">PASS  coverage  0 error(s), 0 warning(s)</text>
+<text class="row pass r10" x="28" y="338">PASS  perms     0 error(s), 0 warning(s)</text>
+<text class="row ready r11" x="28" y="364">READY: every required gate passed on the current files</text>
+<text class="row r12" x="28" y="390"><tspan class="name">malfoy</tspan><tspan class="say" dx="14">Ready. Activating it in production is your call, not mine.</tspan></text>
+</svg>

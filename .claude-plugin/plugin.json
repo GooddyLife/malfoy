@@ -1,0 +1,9 @@
+{
+  "name": "malfoy",
+  "description": "An exacting senior engineer for Salesforce Agentforce. Takes an agent from a vague request to tested and activation-ready, with a deterministic gate between every phase.",
+  "author": { "name": "GooddyLife", "url": "https://github.com/GooddyLife" },
+  "homepage": "https://github.com/GooddyLife/malfoy",
+  "repository": "https://github.com/GooddyLife/malfoy",
+  "license": "MIT",
+  "keywords": ["salesforce", "agentforce", "agent-script", "claude-code", "skills"]
+}
