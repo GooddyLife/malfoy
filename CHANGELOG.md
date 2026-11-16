@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Lessons from [the recorded run](examples/recorded-run):
+
+- The example's `tests.yaml` named actions by their reasoning alias and the topic by the `start_agent` block. The Testing Center reports the action definition name and `topic_selector`; the example now uses both.
+- Phase 5: judge anything that depends on an action's result with live actions, because simulated actions invent the result.
+- Phase 0: `recon --no-orgs` when the session is recorded or shared.
+- `platform-gotchas.md`: simulated actions, Testing Center names, published agents that the Metadata API cannot delete, intermittent CLI failures, Windows long paths, and the first `perms` run of a new agent user.
+
 ## 0.2.0 (2026-11-16)
 
 ### Added

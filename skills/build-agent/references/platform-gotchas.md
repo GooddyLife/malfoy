@@ -11,12 +11,17 @@ A service agent runs as its `default_agent_user`, not as the person who built it
 - Check before testing: `gates.py perms` covers the user, Apex class access and Flow state. Field and object permissions are not derivable from the `.agent` file; check them against the fields each action reads and writes.
 - Check as the agent user, by query. Confirming the permission set on your own admin user proves nothing.
 - Where it is visible: in a preview trace, the enabled-tools step lists withheld actions with the reason `NO_USER_ACCESS`.
+- A user from `sf org create agent-user` gets the standard Agentforce permission sets and nothing else: no access to your Apex classes. Expect `perms` P5 on its first run ([recorded run](../../../examples/recorded-run)).
 
 ## A good reply is not proof that the action ran
 
 The model can produce a plausible answer without calling the action. The proof that an action executed is the function step in the trace, with the input it received. Judge every test on the trace.
 
 A common cause: the instructions describe the valid format of an input ("ask for the code in the format ABC-0000"). The model then validates the format itself and answers "not found" without calling anything. Tell it the opposite: call the action with the text as typed; the action validates, not you.
+
+## Simulated actions invent the result
+
+`sf agent preview start --simulate-actions` does not call the action: the model writes its output. In the recorded run, a probe asked the agent to confirm a protocol that does not exist; the simulated lookup returned `found: true` with a made-up status, and the agent repeated it. The same probe with `--use-live-actions` got "not found". Simulation tests routing and whether the action is chosen. Anything that depends on what the action returns, fabrication above all, needs live actions in a sandbox with made-up data.
 
 ## Declare the locale
 
@@ -47,6 +52,23 @@ The relationship is `BotDefinition`, not `Bot` (that one fails with an invalid r
 ## Flows called by the agent must be active
 
 A Flow target that exists only as a draft fails at runtime, and a Flow deployed as a draft can report a successful deploy. `gates.py perms` checks that each `flow://` target has an active version in the org.
+
+## Testing Center names are not the ones in your instructions
+
+Measured on a sandbox with Salesforce CLI 2.140 and a published Agent Script agent:
+
+- `expectedActions` matches the action's **definition** name (the key under `actions:`, such as `lookup_order`), not the alias in `reasoning: actions:` (such as `lookup`). Some guidance says the opposite; check the action names in a first run's results.
+- For an agent with only `start_agent` and no subagents, the reported topic is `topic_selector`, not the name of the `start_agent` block. Declare it on every case: leaving `expectedTopic` out still produces a failed topic assertion.
+
+## A published agent cannot be deleted through the Metadata API
+
+`sf project delete source` on the `Bot`, `GenAiPlannerBundle` and `AiAuthoringBundle` of a published agent fails with `invalid cross reference id`: the pieces reference each other. Deactivate it (`sf agent deactivate`, then `gates.py active` to prove it), and delete it in Setup. A draft that was never published can be deleted with the CLI. Use names that make a test agent obvious.
+
+## The CLI fails intermittently
+
+During one session, `sf agent preview` returned `Agent ... not found` and `read EINVAL` between calls that worked, `sf agent test run` lost its poll the same way, and `sf agent publish` once failed with `Error refreshing connection`. Retrying worked each time. Before retrying a publish, query `BotVersion` to see whether the first attempt created a version. A lost test poll can be resumed with `sf agent test results --job-id`.
+
+On Windows, the metadata `sf agent publish` retrieves has paths long enough that git cannot add them without `git config core.longpaths true`.
 
 ## Test with the input real people send
 

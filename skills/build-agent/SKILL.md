@@ -60,7 +60,7 @@ Keep every artifact of one agent in `.malfoy/<AgentApiName>/`: `spec.md`, `tests
 
 ### Phase 0: set up and read the repo
 
-Run `doctor`. If a required skill is missing, offer to run `scripts/install-upstream.sh` (it overwrites local copies of the `agentforce-*` skills). Then run `recon` and read [references/repo-recon.md](references/repo-recon.md) to turn its output into a repo profile.
+Run `doctor`. If a required skill is missing, offer to run `scripts/install-upstream.sh` (it overwrites local copies of the `agentforce-*` skills). Then run `recon` and read [references/repo-recon.md](references/repo-recon.md) to turn its output into a repo profile. `recon` lists the alias of every org authenticated on the machine; when the session is recorded or shared, run it with `--no-orgs` and name the target org instead.
 
 Classify the request before going on:
 
@@ -88,7 +88,7 @@ Read [references/platform-gotchas.md](references/platform-gotchas.md) before wri
 
 ### Phase 5: test
 
-Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). Run `coverage`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in tests: typos, fragments, wrong formats.
+Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). Run `coverage`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in tests: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name.
 
 ### Phase 6: release
 
