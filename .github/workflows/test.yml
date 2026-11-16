@@ -27,3 +27,10 @@ jobs:
           python ../../skills/build-agent/scripts/gates.py spec spec.md
           python ../../skills/build-agent/scripts/gates.py lint OrderStatus.agent --final
           python ../../skills/build-agent/scripts/gates.py coverage spec.md tests.yaml
+
+  all-gates:  # the one required check; skipped would count as passing, so it always runs
+    if: always()
+    needs: gates
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.gates.result }}" = success

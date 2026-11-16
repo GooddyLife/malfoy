@@ -1,0 +1,43 @@
+name: A failure a script could catch
+description: An agent failed in a way a deterministic check would have caught. This is the contribution the project wants most.
+title: "[check] "
+labels: ["new check"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        No real data: no org IDs, usernames, customer or company names. Use made-up ones.
+  - type: textarea
+    id: symptom
+    attributes:
+      label: What you saw
+      description: The symptom, as it was reported to you.
+      placeholder: The agent answered fine in preview, but in production it said "something went wrong" on every order lookup.
+    validations:
+      required: true
+  - type: textarea
+    id: cause
+    attributes:
+      label: What the cause turned out to be
+      placeholder: The agent user had no access to the Apex class behind the action. The admin running preview did.
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: How to prove it
+      description: In a file, or with a read-only query. Paste it.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where would the check run?
+      options:
+        - On the .agent file (lint)
+        - On the spec or tests
+        - Against the org, read-only
+        - Not sure
+    validations:
+      required: true

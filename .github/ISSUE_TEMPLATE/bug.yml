@@ -1,0 +1,29 @@
+name: Bug
+description: A gate gave the wrong answer, crashed, or Malfoy skipped something he should not have.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        No real data: no org IDs, usernames, customer or company names. Use made-up ones.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: The gates.py command you ran and its full output, or the part of the session where Malfoy went wrong.
+      render: console
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: Windows 11, Python 3.12, sf 2.x, Claude Code 2.x
+    validations:
+      required: true
