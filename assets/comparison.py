@@ -19,12 +19,13 @@ ROWS = [  # label, the official skills on their own, the same skills conducted b
     ("Compiler gaps", "Reference pages to read", "lint: seven rules, file and line"),
     ("\"It's active\"", "A query in the docs", "active: pass or fail"),
     ("Edited after a pass", "Nothing records it", "STALE"),
+    ("Spec per version", "Saved, not tied to what shipped", "active logs version, hashes, commit"),
     ("Your repo's rules", "Not looked for", "Read first. They override his"),
 ]
 GATES = ("coverage", "perms", "lint", "active", "STALE")
 CLOSING = "The official skills do the building. Malfoy makes them prove it."
 
-LOOP, FIRST, STEP, ANSWER = 27.0, 1.2, 2.0, 0.8   # seconds
+LOOP, FIRST, STEP, ANSWER = 29.0, 1.2, 2.0, 0.8   # seconds
 W, TOP, ROW = 880, 112, 34
 X_LABEL, X_LEFT, X_MARK, X_RIGHT = 28, 196, 556, 580
 H = TOP + ROW * len(ROWS) + 58
@@ -64,7 +65,7 @@ end = FIRST + len(ROWS) * STEP + 0.6
 css += [appear("z", end), f".z{{animation:z {LOOP:g}s linear infinite}}"]
 foot = TOP + ROW * len(ROWS)
 
-svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-label="Ten differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below the image.">
+svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-label="Eleven differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below the image.">
 <style>
 text{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}}
 .anim{{opacity:0}}

@@ -47,7 +47,7 @@ On first use he checks that the `agentforce-*` skills from [forcedotcom/sf-skill
 Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.com/forcedotcom/sf-skills). They do the building. This is what changes when someone conducts them.
 
 <p align="center">
-  <img src="assets/comparison.svg" width="100%" alt="Ten differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below.">
+  <img src="assets/comparison.svg" width="100%" alt="Eleven differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below.">
 </p>
 
 <details>
@@ -64,6 +64,7 @@ Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.co
 | **What the compiler stays quiet about** | Reference pages to read | `lint`: seven rules, with file and line |
 | **"It's active"** | A query in the docs | `active`, pass or fail, before he says the word |
 | **A file edited after its check passed** | Nothing records it | `STALE` |
+| **Which spec shipped as which version** | The spec is saved in the project; nothing ties it to the version published | `active` records the version, the hash of the spec, tests and agent, and the commit. `status` shows `DRIFT` |
 | **Your repo's deploy and approval rules** | Not looked for | Read first. They override his |
 
 </details>
