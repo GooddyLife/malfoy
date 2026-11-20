@@ -155,7 +155,8 @@ class GatesTest(unittest.TestCase):
 
     def test_handoff_tests_must_expect_escalation(self):
         spec, agent = self.file("spec.md", SPEC), self.file("a.agent", AGENT)
-        bad = TESTS.replace("escalate_to_human", "lookup_order", 1)
+        bad = TESTS.replace("expectedTopic: human", "expectedTopic: topic_selector", 1)
+        self.assertNotEqual(bad, TESTS)
         self.assertIn("H8", self.codes(gates.gate_handoff(spec, agent, self.file("t.yaml", bad))))
 
     def test_handoff_org_results_without_escalation(self):
@@ -472,8 +473,8 @@ class ReleaseLogTest(unittest.TestCase):
 
 class ObservabilityTest(unittest.TestCase):
     def setUp(self):
-        original = gates.soql
-        self.addCleanup(setattr, gates, "soql", original)
+        for name in ("soql", "soql_count", "org_api_version"):
+            self.addCleanup(setattr, gates, name, getattr(gates, name))
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.folder = Path(self.dir.name)
@@ -494,7 +495,7 @@ class ObservabilityTest(unittest.TestCase):
         self.assertIn(("Summer '24", "2024-06-10"), newer)
 
     def test_testrun_records_api_and_platform_in_state(self):
-        gates.soql = FakeOrg(Organization=[{"ApiVersion": "65.0"}])
+        gates.org_api_version = lambda org: "65.0"
         code = gates.main(["testrun", self.tests, "-o", "fake", "--pass", "--state", self.state])
         self.assertEqual(code, 0)
         run = json.loads(Path(self.state).read_text())["test_run"]
@@ -503,7 +504,7 @@ class ObservabilityTest(unittest.TestCase):
         self.assertIn("platform_release", run)
 
     def test_status_retest_when_platform_moves_on(self):
-        gates.soql = FakeOrg(Organization=[{"ApiVersion": "65.0"}])
+        gates.org_api_version = lambda org: "65.0"
         self.write_release(at="2025-01-01T00:00:00+00:00")
         Path(self.state).write_text(json.dumps({
             "test_run": {"ok": True, "at": "2025-01-01T00:00:00+00:00", "org": "fake",
@@ -518,7 +519,7 @@ class ObservabilityTest(unittest.TestCase):
     def test_status_retest_when_api_version_changes(self):
         self.write_release()
         gates.record_test_run(self.state, "fake", self.tests, True, "65.0", "Summer '26")
-        gates.soql = FakeOrg(Organization=[{"ApiVersion": "66.0"}])
+        gates.org_api_version = lambda org: "66.0"
         out = io.StringIO()
         with redirect_stdout(out):
             gates.status(self.state, ["spec"], org="fake")
@@ -537,21 +538,20 @@ class ObservabilityTest(unittest.TestCase):
     def test_observe_uses_messaging_session_counts(self):
         spec = self.file("spec.md", SPEC)
         self.write_release(at="2020-01-01T00:00:00+00:00")
-        gates.soql = FakeOrg(
-            MessagingSession=[{"expr0": 10}],
-        )
         calls = []
 
-        def counting(org, query):
+        def counting(org, query):  # COUNT() answers in totalSize, never in records
             calls.append(query)
-            if "CaseId" in query:
-                return [{"expr0": 3}]
-            return [{"expr0": 10}]
+            return 3 if "CaseId" in query else 10
 
-        gates.soql = counting
+        gates.soql_count = counting
         gate = gates.gate_observe(spec, "fake", self.state, None)
         self.assertNotIn("M4", self.codes(gate))
         self.assertEqual(len(calls), 2)
+        # the window is [release, release + 30 days], not "from now on"
+        self.assertIn("CreatedDate >= 2020-01-01T00:00:00Z", calls[0])
+        self.assertIn("CreatedDate <= 2020-01-31T00:00:00Z", calls[0])
+        self.assertIn("org-wide", " ".join(gate.notes))
 
     def file(self, name: str, content: str) -> str:
         path = self.folder / name
@@ -560,6 +560,213 @@ class ObservabilityTest(unittest.TestCase):
 
     def codes(self, gate) -> set:
         return {code for code, _, _ in gate.errors + gate.warns}
+
+
+# Shapes measured on a real sandbox run (sf CLI 2.140, plugin-agent 1.42, Winter '27).
+# Utterances, Ids and names below are made up; only the JSON structure is real.
+def cli_result(rows, envelope=False):
+    payload = {"status": "COMPLETED", "startTime": "2026-11-20T18:45:00Z",
+               "endTime": "2026-11-20T18:46:00Z", "subjectName": "OrderStatus",
+               "testCases": rows}
+    return {"status": 0, "result": dict(payload, runId="4KB000000000001AAA"),
+            "warnings": []} if envelope else payload
+
+
+def cli_row(number, utterance, topic, actions, results=("PASS", "PASS", "PASS")):
+    names = ("topic_assertion", "actions_assertion", "output_validation")
+    sequence = "[" + ", ".join(f"&#39;{a}&#39;" for a in actions) + "]"
+    return {"testNumber": number, "status": "COMPLETED",
+            "inputs": {"utterance": utterance},
+            "generatedData": {"actionsSequence": sequence, "topic": topic,
+                              "outcome": "made-up reply"},
+            "testResults": [{"name": n, "result": r} for n, r in zip(names, results)]}
+
+
+HANDOFF_TESTS = TESTS  # the example expects `expectedTopic: human` for @utils.escalate
+ACTION_STYLE_TESTS = TESTS.replace(
+    "    expectedTopic: human\n    expectedActions: []\n",
+    "    expectedTopic: topic_selector\n    expectedActions:\n      - escalate_to_human\n")
+
+
+class RealOrgShapesTest(unittest.TestCase):
+    """Regressions found by running every gate against a real sandbox."""
+
+    def setUp(self):
+        for name in ("soql", "soql_count", "org_api_version", "sf"):
+            self.addCleanup(setattr, gates, name, getattr(gates, name))
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def file(self, name, content):
+        path = Path(self.dir.name) / name
+        path.write_text(content if isinstance(content, str) else json.dumps(content),
+                        encoding="utf-8")
+        return str(path)
+
+    def codes(self, gate):
+        return {code for code, _, _ in gate.errors + gate.warns}
+
+    def test_lint_does_not_read_a_15_letter_word_as_a_record_id(self):
+        agent = AGENT + ('\nconnection messaging:\n    outbound_route_type: "OmniChannelFlow"\n'
+                         '    outbound_route_name: "flow://Support_Queue"\n')
+        self.assertNotIn("L6", self.codes(gates.gate_lint(self.file("a.agent", agent))))
+
+    def test_record_ids_are_found_wherever_they_sit_in_the_case(self):
+        moved = TESTS.replace(
+            '    recordId: "801000000000001AAA"\n    expectedTopic: topic_selector\n',
+            '    expectedTopic: topic_selector\n    recordIds:\n'
+            '      - "801000000000001AAA"\n      - 801000000000002AAA\n')
+        self.assertNotEqual(moved, TESTS)
+        spec = self.file("spec.md", SPEC)
+        gate = gates.gate_coverage(spec, self.file("t.yaml", moved), final=True)
+        self.assertNotIn("C7", self.codes(gate))
+        self.assertEqual(gates.record_ids_in_tests(moved),
+                         ["801000000000001AAA", "801000000000002AAA"])
+        # tags spread over the comment block: messy-data above another tag still counts
+        reordered = TESTS.replace("  # UC-02\n  # messy-data\n", "  # messy-data\n  # UC-02\n")
+        self.assertNotEqual(reordered, TESTS)
+        self.assertEqual(len(gates.messy_data_tests(reordered)), 1)
+
+    def test_testrun_reads_the_real_cli_result(self):
+        tests = self.file("tests.yaml", TESTS)
+        gates.org_api_version = lambda org: "68.0"
+        rows = [cli_row(1, "It's order 48213", "topic_selector", ["lookup_order"]),
+                cli_row(2, "I want to talk to a person", "human", [])]
+        for envelope in (False, True):
+            gate = gates.gate_testrun(tests, "fake",
+                                      self.file("r.json", cli_result(rows, envelope)), False)
+            self.assertEqual([c for c, _, _ in gate.errors], [], envelope)
+            self.assertTrue(gate.tests_ok)
+        rows[1] = cli_row(2, "I want to talk to a person", "topic_selector", [],
+                          ("FAILURE", "FAILURE", "PASS"))
+        gate = gates.gate_testrun(tests, "fake", self.file("r.json", cli_result(rows)), False)
+        self.assertEqual([c for c, _, _ in gate.errors], ["T4"])
+        self.assertIn("test case 2 failed (topic_assertion, actions_assertion)",
+                      gate.errors[0][2])
+        self.assertIn("T5", self.codes(gate))  # 2 rows vs 7 cases in tests.yaml
+
+    def test_handoff_tests_may_expect_the_human_topic_or_an_escalation_action(self):
+        self.assertIn("expectedTopic: human", TESTS)
+        self.assertNotEqual(ACTION_STYLE_TESTS, TESTS)
+        spec, agent = self.file("spec.md", SPEC), self.file("a.agent", AGENT)
+        for tests in (HANDOFF_TESTS, ACTION_STYLE_TESTS):
+            gate = gates.gate_handoff(spec, agent, self.file("t.yaml", tests))
+            self.assertEqual(gate.errors, [])
+
+    def test_handoff_results_read_the_real_trace(self):
+        spec, agent = self.file("spec.md", SPEC), self.file("a.agent", AGENT)
+        tests = self.file("t.yaml", HANDOFF_TESTS)
+        lookup = cli_row(1, "It's order 48213 and my email is dana@example.com",
+                         "topic_selector", ["lookup_order"])
+        good = cli_row(4, "I want to talk to a person", "human", [])
+        results = self.file("ok.json", cli_result([lookup, good], envelope=True))
+        self.assertEqual(self.codes(gates.gate_handoff(spec, agent, tests, results)), set())
+        # a handoff test that FAILED is checked too, and a lookup row is never an H10
+        bad = cli_row(4, "I want to talk to a person", "topic_selector", ["lookup_order"],
+                      ("FAILURE", "FAILURE", "PASS"))
+        results = self.file("bad.json", cli_result([lookup, bad]))
+        gate = gates.gate_handoff(spec, agent, tests, results)
+        self.assertEqual([c for c, _, _ in gate.errors], ["H10"])
+        # no row for the handoff test at all
+        results = self.file("none.json", cli_result([lookup]))
+        self.assertIn("H11", self.codes(gates.gate_handoff(spec, agent, tests, results)))
+
+    def test_perms_skips_fields_that_have_no_field_permissions(self):
+        agent = self.file("a.agent", AGENT + '\n            target: "apex://OrderService"\n')
+        spec = self.file("spec.md", SPEC.replace(
+            "`Order__c.Status__c`, ",
+            "`Order__c.Status__c`, `Order__c.Name`, `Order__c.Typo__c`, "))
+        particles = [{"EntityDefinition": {"QualifiedApiName": "Order__c"},
+                      "QualifiedApiName": n, "IsPermissionable": n != "Name"}
+                     for n in ("Status__c", "Estimated_Delivery__c", "Customer_Email__c", "Name")]
+        gates.soql = FakeOrg(
+            User=[AGENT_USER], PermissionSetAssignment=[ASSIGNED],
+            ApexClass=[{"Id": "01p000000000001AAA", "Name": "OrderService"}],
+            SetupEntityAccess=[{"SetupEntityId": "01p000000000001AAA"}],
+            FlowDefinitionView=[FLOW_OK], EntityParticle=particles,
+            ObjectPermissions=[{"SobjectType": "Order__c"}],
+            FieldPermissions=[{"Field": f} for f in (
+                "Order__c.Status__c", "Order__c.Estimated_Delivery__c",
+                "Order__c.Customer_Email__c")])
+        gate = gates.gate_perms(agent, "fake", spec)
+        self.assertEqual([(c, m.split("`")[1]) for c, _, m in gate.errors],
+                         [("P11", "Order__c.Typo__c")])
+        self.assertIn("Order__c.Name", " ".join(gate.notes))
+
+    def test_perms_record_that_does_not_exist_is_a_p13_not_a_crash(self):
+        # measured: UserRecordAccess with one well-formed Id that is not in the org fails the
+        # whole query with "invalid parameter value"
+        def fake(org, query):
+            if "FROM UserRecordAccess" in query:
+                if "801000000000009AAA" in query:
+                    raise gates.CannotRun("`sf data query` failed: invalid parameter value")
+                return [{"RecordId": "801000000000001AAA", "HasReadAccess": True}]
+            return FakeOrg(User=[AGENT_USER], PermissionSetAssignment=[ASSIGNED],
+                           ApexClass=[{"Id": "01p000000000001AAA", "Name": "OrderService"}],
+                           SetupEntityAccess=[{"SetupEntityId": "01p000000000001AAA"}],
+                           FlowDefinitionView=[FLOW_OK])(org, query)
+        gates.soql = fake
+        agent = self.file("a.agent", AGENT + '\n            target: "apex://OrderService"\n')
+        tests = self.file("t.yaml", TESTS.replace(
+            'recordId: "801000000000001AAA"',
+            'recordIds: ["801000000000001AAA", "801000000000009AAA"]'))
+        gate = gates.gate_perms(agent, "fake", tests_path=tests)
+        self.assertEqual([(c, m.split("`")[1]) for c, _, m in gate.errors],
+                         [("P13", "801000000000009AAA")])
+        def offline(org, query):
+            raise gates.CannotRun("`sf data query` gave no answer in 120s")
+        with self.assertRaises(gates.CannotRun):
+            gates.soql = offline
+            gates.check_record_visibility("fake", "005000000000001AAA", ["801000000000001AAA"])
+
+    def test_perms_route_flow_does_not_need_run_flows(self):
+        agent = self.file("a.agent", AGENT.replace("flow://Lookup_Order", "apex://OrderService")
+                          + '\nconnection messaging:\n    outbound_route_type: "OmniChannelFlow"\n'
+                            '    outbound_route_name: "flow://Support_Queue"\n')
+        gates.soql = FakeOrg(
+            User=[AGENT_USER], PermissionSetAssignment=[dict(ASSIGNED, PermissionSet={})],
+            ApexClass=[{"Id": "01p000000000001AAA", "Name": "OrderService"}],
+            SetupEntityAccess=[{"SetupEntityId": "01p000000000001AAA"}],
+            FlowDefinitionView=[{"ApiName": "Support_Queue",
+                                 "ActiveVersionId": "301000000000001AAA"}])
+        self.assertNotIn("P8", self.codes(gates.gate_perms(agent, "fake")))
+
+    def test_status_on_the_release_log_is_a_clean_error(self):
+        log = self.file("releases.json", {"releases": [
+            {"org": "fake", "version": 1, "at": "2026-01-01T00:00:00+00:00", "inputs": {}}]})
+        err = io.StringIO()
+        old = sys.stderr
+        sys.stderr = err
+        try:
+            with redirect_stdout(io.StringIO()):
+                code = gates.main(["status", log])
+        finally:
+            sys.stderr = old
+        self.assertEqual(code, 2)
+        self.assertIn("release log", err.getvalue())
+
+    def test_org_api_version_comes_from_org_display(self):
+        calls = []
+        gates.sf = lambda *args: calls.append(args) or {"apiVersion": "68.0"}
+        self.assertEqual(gates.org_api_version("fake"), "68.0")
+        self.assertEqual(calls, [("org", "display", "-o", "fake")])
+
+    def test_success_metric_in_portuguese(self):
+        spec = re.sub(r"## Success Metric\n\n.*?\n\n",
+                      "## Success Metric\n\n70% das conversas terminam sem transferência, "
+                      "medido nos primeiros 30 dias.\n\n", SPEC, count=1, flags=re.S)
+        self.assertIn("primeiros 30 dias", spec)
+        self.assertEqual(gates.parse_success_metric(spec), (70, 30))
+
+    def test_wrapped_messy_criterion_is_read_whole(self):
+        _, criteria = gates.messy_declaration(SPEC)
+        self.assertIn({"kind": "empty", "field": "Order__c.Customer_Email__c"}, criteria)
+
+    def test_doctor_warns_when_the_release_calendar_is_stale(self):
+        old = gates.PLATFORM_RELEASES
+        self.addCleanup(setattr, gates, "PLATFORM_RELEASES", old)
+        gates.PLATFORM_RELEASES = old[:3]
+        self.assertIn("D5", self.codes(gates.gate_doctor()))
 
 
 if __name__ == "__main__":

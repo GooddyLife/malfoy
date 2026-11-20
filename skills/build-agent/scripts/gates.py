@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -94,16 +95,27 @@ TOP_BLOCK = re.compile(r"^([A-Za-z_]\w*)(?:\s+[\w.]+)?\s*:")
 LITERAL_BLOCK = re.compile(r"^(\s*)[\w.\-]+\s*:\s*\|[+-]?\d*\s*$")
 SF_TIMEOUT = int(os.environ.get("MALFOY_SF_TIMEOUT", "120"))  # seconds per sf call
 STATE_META = frozenset({"test_run"})  # not gates; do not list in `status` as PASS/FAIL
-RECORD_ID = re.compile(r"""["']([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)["']""")
+# A Salesforce Id: 3-char key prefix, 2-char pod, a reserved `0`, then the record number.
+# Requiring that `0` keeps 15-letter words such as `OmniChannelFlow` from reading as an Id.
+SF_ID = r"[a-zA-Z0-9]{5}0[a-zA-Z0-9]{9}(?:[a-zA-Z0-9]{3})?"
+RECORD_ID = re.compile(rf"""["']({SF_ID})["']""")
+RECORD_ID_BARE = re.compile(rf"(?<![A-Za-z0-9])({SF_ID})(?![A-Za-z0-9])")
+# Testing Center reports `@utils.escalate` as a switch to the topic `human`, with no action
+# in actionsSequence (measured on a real org, Winter '27, sf agent 1.42).
+ESCALATION_TOPICS = frozenset({"human"})
 # Bundled GA dates for seasonal Salesforce releases (calendar is deterministic; patch level is not).
 PLATFORM_RELEASES = [
     ("Winter '24", "2023-10-13"), ("Spring '24", "2024-02-26"), ("Summer '24", "2024-06-10"),
     ("Winter '25", "2024-10-14"), ("Spring '25", "2025-02-25"), ("Summer '25", "2025-06-17"),
     ("Winter '26", "2025-10-14"), ("Spring '26", "2026-02-24"), ("Summer '26", "2026-06-16"),
+    ("Winter '27", "2026-10-12"),
 ]
+CALENDAR_STALE_DAYS = 150  # a seasonal release ships every ~4 months
 SUCCESS_PCT = re.compile(
-    r"(\d+)\s*%.*?without\s+(?:a\s+)?transfer", re.I | re.S)
-SUCCESS_WINDOW = re.compile(r"(?:first|over\s+the\s+first)\s+(\d+)\s+days?", re.I)
+    r"(\d+)\s*%.*?(?:without\s+(?:a\s+)?transfer|"
+    r"sem\s+(?:transfer[eê]ncia|transferir|transbordo|transbordar))", re.I | re.S)
+SUCCESS_WINDOW = re.compile(
+    r"(?:first|over\s+the\s+first|primeiros)\s+(\d+)\s+(?:days?|dias)", re.I)
 
 
 class CannotRun(Exception):
@@ -248,8 +260,10 @@ def newer_platform_releases(iso_timestamp: str) -> list[tuple[str, str]]:
 
 
 def org_api_version(org: str) -> str | None:
-    rows = soql(org, "SELECT ApiVersion FROM Organization LIMIT 1")
-    return str(rows[0]["ApiVersion"]) if rows else None
+    """Highest API version the org serves. `Organization` has no ApiVersion column (the
+    query fails on every org), so read it from `sf org display`."""
+    version = sf("org", "display", "-o", org).get("apiVersion")
+    return str(version) if version else None
 
 
 def record_test_run(state: str, org: str, tests_path: str, ok: bool,
@@ -324,23 +338,29 @@ def activation_time(state: Path, org: str) -> datetime | None:
     return None
 
 
-def session_transfer_counts(org: str, since_iso: str) -> tuple[int, int, str] | None:
-    """(total sessions, sessions without transfer proxy, data source note), or None if SOQL fails."""
-    since = since_iso.replace("+00:00", "Z")
+def soql_iso(stamp: str) -> str:
+    """SOQL datetime literal: UTC, no fractional seconds, `Z`."""
+    moment = datetime.fromisoformat(stamp).astimezone(timezone.utc)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def session_transfer_counts(org: str, since_iso: str,
+                            until_iso: str | None = None) -> tuple[int, int, str] | None:
+    """(total sessions, sessions without transfer proxy, data source note), or None if SOQL fails.
+    Counts sessions created inside the window [since, until]."""
+    window = f"CreatedDate >= {soql_iso(since_iso)}"
+    if until_iso:
+        window += f" AND CreatedDate <= {soql_iso(until_iso)}"
+    bots = "AgentType IN ('Bot', 'Agent Bot')"
     try:
-        total_rows = soql(org, "SELECT COUNT() FROM MessagingSession "
-                              f"WHERE CreatedDate >= {since} "
-                              "AND AgentType IN ('Bot', 'Agent Bot')")
-        total = total_rows[0].get("expr0", 0) if total_rows else 0
-        escalated_rows = soql(org, "SELECT COUNT() FROM MessagingSession "
-                                    f"WHERE CreatedDate >= {since} "
-                                    "AND AgentType IN ('Bot', 'Agent Bot') "
-                                    "AND (EndedByType = 'BotToAgent' OR CaseId != null)")
-        escalated = escalated_rows[0].get("expr0", 0) if escalated_rows else 0
+        total = soql_count(org, f"SELECT COUNT() FROM MessagingSession WHERE {window} AND {bots}")
+        escalated = soql_count(org, f"SELECT COUNT() FROM MessagingSession WHERE {window} "
+                                    f"AND {bots} AND (EndedByType = 'BotToAgent' OR CaseId != null)")
     except CannotRun:
         return None
     note = ("MessagingSession counts (bot sessions; transfer ≈ BotToAgent end or CaseId set). "
-            "This is a SOQL proxy — not Agentforce Session Tracing in Data Cloud.")
+            "This is a SOQL proxy — not Agentforce Session Tracing in Data Cloud — and it is "
+            "org-wide: MessagingSession does not say which agent served the session.")
     return total, max(total - escalated, 0), note
 
 
@@ -349,12 +369,15 @@ def gate_testrun(tests_path: str, org: str, result_json: str | None, passed: boo
     ok = False
     if result_json:
         try:
-            payload = json.loads(Path(result_json).read_text(encoding="utf-8-sig"))
+            payload = unwrap_cli_result(json.loads(Path(result_json).read_text(encoding="utf-8-sig")))
         except (OSError, ValueError) as exc:
             raise CannotRun(f"cannot read test result JSON: {exc}") from exc
-        ok = bool(payload.get("success", payload.get("passed", False)))
-        if not ok:
-            gate.error("T4", "agent test result JSON does not report success", result_json)
+        if isinstance(payload, dict) and isinstance(payload.get("success", payload.get("passed")), bool):
+            ok = bool(payload.get("success", payload.get("passed")))
+            if not ok:
+                gate.error("T4", "agent test result JSON does not report success", result_json)
+        else:
+            ok = judge_test_run(gate, payload, result_json, tests_path)
     elif passed:
         ok = True
     else:
@@ -365,6 +388,40 @@ def gate_testrun(tests_path: str, org: str, result_json: str | None, passed: boo
         gate.note(f"org API {version or 'unknown'}; bundled platform release {platform}")
     gate.tests_ok = ok
     return gate
+
+
+def unwrap_cli_result(data):
+    """`sf ... --json` wraps the payload as {"status": 0, "result": {...}}; the file written
+    by `--output-dir` is the bare payload. Accept both."""
+    if isinstance(data, dict) and isinstance(data.get("result"), (dict, list)) \
+            and "testCases" not in data:
+        return data["result"]
+    return data
+
+
+def judge_test_run(gate: Gate, payload, result_json: str, tests_path: str) -> bool:
+    """A run passes when it completed and every assertion of every test case passed.
+    `sf agent test run` has no top-level success flag: status COMPLETED only means it ran."""
+    rows = agent_test_rows(payload)
+    if not rows:
+        gate.error("T4", "no test cases in the result JSON", result_json)
+        return False
+    status = str(payload.get("status", "")).upper() if isinstance(payload, dict) else ""
+    if status and status not in ("COMPLETED", "SUCCESS", "PASSED"):
+        gate.error("T4", f"the test run did not complete (status `{status}`)", result_json)
+    failed = [r for r in rows if not r["passed"]]
+    for row in failed:
+        gate.error("T4", f"test case {row['number'] or '?'} failed "
+                         f"({', '.join(row['failed_assertions']) or row['status'] or 'no PASS'}): "
+                         f"{row['utterance'][:60]!r}", result_json)
+    with suppress(CannotRun):
+        expected = len(test_cases_with_meta(text_of(tests_path)))
+        if expected and expected != len(rows):
+            gate.warn("T5", f"the result has {len(rows)} test case(s); tests.yaml has "
+                            f"{expected}: was the org definition created from this file?",
+                      result_json)
+    gate.note(f"{len(rows) - len(failed)}/{len(rows)} test case(s) passed every assertion")
+    return not failed and not gate.errors
 
 
 def gate_observe(spec_path: str, org: str, state: str | None, input_path: str | None) -> Gate:
@@ -389,7 +446,7 @@ def gate_observe(spec_path: str, org: str, state: str | None, input_path: str | 
     if now_utc < started:
         gate.note(f"measurement window has not started (release {started.date().isoformat()})")
         return gate
-    since = min(now_utc, end)
+    until = min(now_utc, end)
     if now_utc < end:
         gate.note(f"day {(now_utc - started).days + 1} of {window_days} — provisional check only")
 
@@ -406,7 +463,8 @@ def gate_observe(spec_path: str, org: str, state: str | None, input_path: str | 
         source = manual.get("source", "JSON file passed to --input")
         gate.note(f"using documented input: {source}")
     else:
-        counts = session_transfer_counts(org, started.isoformat(timespec="seconds"))
+        counts = session_transfer_counts(org, started.isoformat(timespec="seconds"),
+                                         until.isoformat(timespec="seconds"))
         if counts is None:
             gate.warn("M5", "MessagingSession is not queryable in this org (permissions or "
                             "channel). Pass `--input` with "
@@ -622,27 +680,10 @@ def tagged_ids(tests: str) -> set[str]:
 
 
 def messy_data_tests(tests: str) -> list[dict]:
-    """Test cases whose comment block immediately above includes `# messy-data`."""
-    cases: list[dict] = []
-    pending_messy = False
-    active: dict | None = None
-    for line in tests.splitlines():
-        text = line.strip()
-        if text.startswith("#") and "utterance" not in text:
-            pending_messy = "messy-data" in text.lower()
-        elif re.match(r"-\s*utterance\s*:", text):
-            if pending_messy:
-                active = {"recordIds": []}
-                cases.append(active)
-            else:
-                active = None
-            pending_messy = False
-        elif active is not None and re.match(r"recordIds?\s*:", text, re.I):
-            active["recordIds"].extend(RECORD_ID.findall(line))
-        elif text and not text.startswith("#") and not text.startswith("-"):
-            if active is not None and re.match(r"-\s", line) is None:
-                active = None
-    return cases
+    """Test cases tagged `# messy-data` in the comment block above `- utterance:`, with the
+    record Ids from `recordId` / `recordIds` wherever they sit in the case."""
+    return [{"recordIds": case["record_ids"], "utterance": case["utterance"]}
+            for case in test_cases_with_meta(tests) if case["messy"]]
 
 
 def out_of_scope_items(spec: str) -> list[tuple[str, str]]:
@@ -708,39 +749,70 @@ def customer_facing_agent(spec: str, agent: str | None) -> bool:
 
 
 def test_cases_with_meta(tests: str) -> list[dict]:
-    """Each live test case: UC tags, optional OOS tags, and `expectedActions` if present."""
+    """Each live test case of a Testing Center YAML: tags from the comment block right above
+    `- utterance:` (UC, OOS, messy-data, security), and its `expectedTopic`,
+    `expectedActions` and `recordId`/`recordIds`. Keys may come in any order; a comment
+    inside a case does not end it; the case ends at the next item or a dedent."""
     cases: list[dict] = []
-    pending_uc, pending_oos = set(), set()
+    pending: list[str] = []
     active: dict | None = None
+    list_key: str | None = None
     for line in tests.splitlines():
         text = line.strip()
-        if text.startswith("#") and "utterance" not in text:
-            if active is not None:
-                active = None
-            pending_uc |= set(UC.findall(text))
-            pending_oos |= set(OOS_TAG.findall(text))
-        elif m := re.match(r"-\s*utterance\s*:\s*\"(.+)\"", text):
-            active = {"ucs": set(pending_uc) | set(UC.findall(line)),
-                      "oos": set(pending_oos), "expected_actions": [],
-                      "utterance": m.group(1)}
+        if not text:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if text.startswith("#"):
+            if "utterance" not in text:
+                pending.append(text)
+            else:
+                pending = []  # a commented-out case takes its tags with it
+            continue
+        utterance = re.match(r"-\s*utterance\s*:\s*(.*)$", text)
+        if utterance:
+            tags = " ".join(pending)
+            active = {"ucs": set(UC.findall(tags)) | set(UC.findall(line)),
+                      "oos": set(OOS_TAG.findall(tags)),
+                      "messy": "messy-data" in tags.lower(),
+                      "security": bool(SECURITY_TAG.search(tags)),
+                      "expected_actions": [], "expected_topic": None, "record_ids": [],
+                      "utterance": utterance.group(1).split(" #")[0].strip().strip("\"'"),
+                      "indent": indent}
             cases.append(active)
-            pending_uc, pending_oos = set(), set()
-        elif re.match(r"-\s*utterance\s*:", text):
-            active = {"ucs": set(pending_uc) | set(UC.findall(line)),
-                      "oos": set(pending_oos), "expected_actions": [], "utterance": ""}
-            cases.append(active)
-            pending_uc = pending_oos = set()
-        elif active is not None and re.match(r"expectedActions\s*:", text, re.I):
-            active["collecting_actions"] = True
-        elif active is not None and active.get("collecting_actions"):
-            item = re.match(r"-\s*(\S+)", text)
-            if item:
-                active["expected_actions"].append(item.group(1))
-            elif text and not text.startswith("#"):
-                active["collecting_actions"] = False
-        elif active is not None and text and not text.startswith("#"):
-            if not text.startswith("-") and not re.match(r"[\w]+:", text):
-                active = None
+            pending, list_key = [], None
+            continue
+        pending = []
+        if active is None:
+            continue
+        if indent <= active["indent"]:
+            active, list_key = None, None  # next list item or a top-level key
+            continue
+        key = re.match(r"([A-Za-z_]\w*)\s*:\s*(.*)$", text)
+        if key:
+            name, value = key.group(1).lower(), key.group(2).split(" #")[0].strip()
+            list_key = None
+            if name == "expectedactions":
+                if value.startswith("["):
+                    active["expected_actions"] += [
+                        a.strip().strip("\"'") for a in value.strip("[]").split(",") if a.strip()]
+                elif value:
+                    active["expected_actions"].append(value.strip("\"'"))
+                else:
+                    list_key = "expected_actions"
+            elif name == "expectedtopic":
+                active["expected_topic"] = value.strip("\"'") or None
+            elif name in ("recordid", "recordids"):
+                active["record_ids"] += RECORD_ID_BARE.findall(value)
+                if not value:
+                    list_key = "record_ids"
+            continue
+        item = re.match(r"-\s*(.+)$", text)
+        if item and list_key:
+            value = item.group(1).strip().strip("\"'")
+            if list_key == "record_ids":
+                active["record_ids"] += RECORD_ID_BARE.findall(value)
+            elif not re.match(r"[A-Za-z_]\w*\s*:", value):
+                active["expected_actions"].append(value)
     return cases
 
 
@@ -833,6 +905,8 @@ def agent_instruction_text(agent: str) -> str:
 
 
 def test_expects_escalation(case: dict, agent: str) -> bool:
+    if (case.get("expected_topic") or "").lower() in ESCALATION_TOPICS:
+        return True
     actions = {a.lower() for a in case.get("expected_actions", [])}
     names = {n.lower() for n in escalation_action_names(agent)}
     if actions & names:
@@ -840,10 +914,25 @@ def test_expects_escalation(case: dict, agent: str) -> bool:
     return any(ESCALATE_ACTION_NAME.search(a) for a in actions)
 
 
-def parse_agent_test_results(path: str) -> list[dict]:
-    """Normalise a few JSON shapes from `sf agent test` / Testing Center exports."""
-    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    rows: list[dict] = []
+def action_names(raw) -> list[str]:
+    """Action names from a list, or from the string Testing Center writes in
+    `generatedData.actionsSequence` (e.g. `[&#39;lookup_order&#39;]`)."""
+    if isinstance(raw, list):
+        return [str(a.get("name", a)) if isinstance(a, dict) else str(a) for a in raw]
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    text = html.unescape(raw)
+    quoted_names = re.findall(r"[\"']([^\"']+)[\"']", text)
+    if quoted_names:
+        return quoted_names
+    return [a.strip() for a in text.strip("[]").split(",") if a.strip()]
+
+
+def agent_test_rows(data) -> list[dict]:
+    """Normalise test case rows from `sf agent test run --result-format json` (with or
+    without the `--json` envelope), Testing Center exports and simple lists."""
+    data = unwrap_cli_result(data)
+    rows: list = []
     if isinstance(data, list):
         rows = data
     elif isinstance(data, dict):
@@ -855,14 +944,30 @@ def parse_agent_test_results(path: str) -> list[dict]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        actions = row.get("actionsExecuted") or row.get("actionsRan") or row.get(
-            "expectedActions") or row.get("actualActions") or []
-        if isinstance(actions, str):
-            actions = [actions]
+        generated = row.get("generatedData") if isinstance(row.get("generatedData"), dict) else {}
+        actions = action_names(row.get("actionsExecuted") or row.get("actionsRan")
+                               or row.get("actualActions") or generated.get("actionsSequence"))
+        inputs = row.get("inputs") if isinstance(row.get("inputs"), dict) else {}
+        assertions = [r for r in row.get("testResults", []) if isinstance(r, dict)]
+        failed = [str(r.get("name")) for r in assertions if str(r.get("result")).upper() != "PASS"]
+        if "passed" in row:
+            passed = bool(row["passed"])
+        elif assertions:
+            passed = not failed
+        else:
+            passed = str(row.get("status", "")).lower() in ("passed", "pass")
         out.append({"actions": actions,
-                    "utterance": row.get("utterance") or row.get("input") or "",
-                    "passed": row.get("passed", row.get("status") == "passed")})
+                    "topic": str(row.get("topic") or generated.get("topic") or ""),
+                    "utterance": str(row.get("utterance") or row.get("input")
+                                     or inputs.get("utterance") or ""),
+                    "passed": passed, "failed_assertions": failed,
+                    "status": str(row.get("status", "")),
+                    "number": row.get("testNumber") or row.get("number")})
     return out
+
+
+def parse_agent_test_results(path: str) -> list[dict]:
+    return agent_test_rows(json.loads(Path(path).read_text(encoding="utf-8-sig")))
 
 
 def gate_coverage(spec_path: str, tests_path: str, org: str | None = None,
@@ -1073,9 +1178,11 @@ def gate_handoff(spec_path: str, agent_path: str,
                     if uc in reported:
                         continue
                     reported.add(uc)
-                    gate.error("H8", f"test for `{uc}` does not list an escalation "
-                                     "action in `expectedActions` (trace must show "
-                                     "the handoff ran)", tests_path)
+                    gate.error("H8", f"test for `{uc}` does not expect the escalation. "
+                                     "Testing Center reports `@utils.escalate` as "
+                                     "`expectedTopic: human` with no action; a custom "
+                                     "escalation action goes in `expectedActions`",
+                               tests_path)
 
     if results_path:
         try:
@@ -1089,22 +1196,31 @@ def gate_handoff(spec_path: str, agent_path: str,
             case["utterance"].lower() for case in (
                 test_cases_with_meta(text_of(tests_path)) if tests_path else [])
             if case.get("utterance") and case["ucs"] & live_uc_set]
+        if not handoff_utterances:
+            gate.warn("H11", "cannot tell which result rows are handoff tests: pass `--tests` "
+                             "with a test tagged on each live `handoff` use case", results_path)
+        matched: set[str] = set()
         for row in rows:
-            if row.get("passed") is False:
+            utter = (row.get("utterance") or "").strip().lower()
+            hits = [u for u in handoff_utterances if utter and (u == utter or u in utter or utter in u)]
+            if not hits:
                 continue
-            utter = (row.get("utterance") or "").lower()
-            if handoff_utterances and not any(u in utter or utter in u for u in handoff_utterances):
-                continue
-            ran = {str(a).lower() for a in row.get("actions", [])}
-            escalated = bool(ran & names) or any(
-                ESCALATE_ACTION_NAME.search(str(a)) for a in row.get("actions", []))
+            matched.update(hits)
+            ran = [str(a) for a in row.get("actions", [])]
+            topic = (row.get("topic") or "").lower()
+            escalated = (topic in ESCALATION_TOPICS or bool({a.lower() for a in ran} & names)
+                         or any(ESCALATE_ACTION_NAME.search(a) for a in ran))
             if not escalated:
-                gate.error("H10", "org test result passed but the trace shows no "
-                                 "escalation action (heuristic name match)",
-                           results_path)
-            elif not ran:
-                gate.warn("H11", "result row has no action list; could not verify "
-                                 "escalation on the trace", results_path)
+                gate.error("H10", "the trace of a handoff test shows no escalation "
+                                  f"(topic `{row.get('topic') or '-'}`, actions {ran or '[]'}): "
+                                  f"{row.get('utterance', '')[:60]!r}", results_path)
+            elif row.get("passed") is False:
+                gate.note(f"handoff test escalated on the trace but failed "
+                          f"{', '.join(row.get('failed_assertions') or ['an assertion'])}: "
+                          "fix its expectations (`expectedTopic: human` for @utils.escalate)")
+        for missing in sorted(set(handoff_utterances) - matched):
+            gate.warn("H11", f"no result row for handoff test {missing[:60]!r}: was the "
+                             "org suite created from this tests.yaml?", results_path)
     return gate
 
 
@@ -1136,11 +1252,25 @@ def spec_data_access(spec_path: str) -> tuple[set[str], set[tuple[str, str]], se
     return spec_data_access_from_body(body)
 
 
+def joined_paragraphs(lines: list[str]) -> list[str]:
+    """Markdown lines with soft-wrapped continuation lines joined back to their paragraph,
+    so a `**Messy records:**` criterion wrapped at 100 columns is read whole."""
+    out: list[str] = []
+    for line in lines:
+        text = line.strip()
+        starts_block = (not text or text[0] in "|#>-*<" or re.match(r"\d+[.)]\s", text))
+        if out and out[-1].strip() and not starts_block and not out[-1].strip().startswith("|"):
+            out[-1] = out[-1].rstrip() + " " + text
+        else:
+            out.append(line)
+    return out
+
+
 def messy_declaration(spec: str) -> tuple[str, list[dict]] | None:
     """Declared sandbox alias and parsed machine-checkable criteria, or None."""
     env = sections(spec).get("environments", (0, []))[1]
     data = sections(spec).get("data & privacy", (0, []))[1]
-    for line in env + data:
+    for line in joined_paragraphs(env) + joined_paragraphs(data):
         match = MESSY_STRUCTURED.search(line)
         if not match:
             continue
@@ -1193,11 +1323,7 @@ def messy_default_sobject(spec_path: str, criteria: list[dict]) -> str | None:
 
 
 def record_ids_in_tests(tests: str) -> list[str]:
-    ids: list[str] = []
-    for line in tests.splitlines():
-        if re.search(r"recordIds?\s*:", line, re.I):
-            ids.extend(RECORD_ID.findall(line))
-    return ids
+    return [record_id for case in test_cases_with_meta(tests) for record_id in case["record_ids"]]
 
 
 def parse_sf_datetime(raw: str) -> datetime:
@@ -1255,8 +1381,22 @@ def check_record_visibility(org: str, user_id: str, record_ids: list[str]) -> di
     """Map record Id -> HasReadAccess for the agent user."""
     if not record_ids:
         return {}
-    rows = soql(org, "SELECT RecordId, HasReadAccess FROM UserRecordAccess "
-                   f"WHERE UserId = '{user_id}' AND RecordId IN ({quoted(record_ids)})")
+    query = ("SELECT RecordId, HasReadAccess FROM UserRecordAccess "
+             f"WHERE UserId = '{user_id}' AND RecordId IN ({{}})")
+    try:
+        rows = soql(org, query.format(quoted(record_ids)))
+    except CannotRun as exc:
+        # One Id that does not exist fails the whole query with "invalid parameter value";
+        # ask one by one so the others are still checked and the missing one is a P13.
+        if "invalid parameter value" not in str(exc).lower():
+            raise
+        rows = []
+        for record_id in dict.fromkeys(record_ids):
+            try:
+                rows += soql(org, query.format(quoted([record_id])))
+            except CannotRun as one:
+                if "invalid parameter value" not in str(one).lower():
+                    raise
     return {row["RecordId"]: bool(row.get("HasReadAccess")) for row in rows}
 
 
@@ -1284,9 +1424,49 @@ def soql(org: str, query: str) -> list[dict]:
     return sf("data", "query", "-q", query, "-o", org).get("records", [])
 
 
+def soql_count(org: str, query: str) -> int:
+    """`SELECT COUNT() ...` returns no records; the count is `totalSize`."""
+    return int(sf("data", "query", "-q", query, "-o", org).get("totalSize", 0))
+
+
 def quoted(values) -> str:
     return ",".join("'" + str(v).replace("\\", "\\\\").replace("'", "\\'") + "'"
                     for v in values)
+
+
+def field_permission_exempt(gate: Gate, org: str, fields: set[tuple[str, str]]) -> set[str]:
+    """Declared fields that have no FieldPermissions row by design (CaseNumber, Status,
+    LastModifiedDate, Name, ...): `IsPermissionable = false` in EntityParticle. Their access
+    follows the object. A declared field the object does not have is a P11 error."""
+    if not fields:
+        return set()
+    objects = sorted({o for o, _ in fields})
+    names = sorted({f.split(".", 1)[1] for _, f in fields})
+    try:
+        rows = soql(org, "SELECT EntityDefinition.QualifiedApiName, QualifiedApiName, "
+                         "IsPermissionable FROM EntityParticle WHERE "
+                         f"EntityDefinition.QualifiedApiName IN ({quoted(objects)}) "
+                         f"AND QualifiedApiName IN ({quoted(names)})")
+    except CannotRun:
+        return set()  # cannot tell: check every field against FieldPermissions
+    known = {}
+    for row in rows:
+        entity = (row.get("EntityDefinition") or {}).get("QualifiedApiName")
+        if entity:
+            known[f"{entity}.{row.get('QualifiedApiName')}"] = bool(row.get("IsPermissionable"))
+    if not known:
+        return set()
+    exempt = set()
+    seen_objects = {k.split(".", 1)[0] for k in known}
+    for obj, field in sorted(fields):
+        if field in known:
+            if not known[field]:
+                exempt.add(field)
+        elif obj in seen_objects:
+            gate.error("P11", f"field `{field}` does not exist in this org "
+                              "(declared in `## Salesforce Data Access`)")
+            exempt.add(field)  # reported once, here
+    return exempt
 
 
 def gate_perms(path: str, org: str, spec_path: str | None = None,
@@ -1296,6 +1476,8 @@ def gate_perms(path: str, org: str, spec_path: str | None = None,
     apex = sorted({re.split(r"[$.]", name)[0]
                    for name in re.findall(r"apex://([\w$.]+)", text)})
     flows = sorted(set(re.findall(r"flow://(\w+)", text)))
+    # an Omni-Channel route in `connection messaging:` is run by routing, not by the agent user
+    route_flows = set(re.findall(r"outbound_route_name\s*:\s*[\"']?flow://(\w+)", text))
     user = agent_user(lines)
     if not user:
         gate.note("no `default_agent_user`: an employee agent runs as the person using it, "
@@ -1340,7 +1522,8 @@ def gate_perms(path: str, org: str, spec_path: str | None = None,
                 gate.error("P6", f"`flow://{name}`: flow is not in this org")
             elif not active[name]:
                 gate.error("P7", f"`flow://{name}`: flow has no active version")
-        if not any((row.get("PermissionSet") or {}).get("PermissionsRunFlow") for row in sets):
+        if set(flows) - route_flows and not any(
+                (row.get("PermissionSet") or {}).get("PermissionsRunFlow") for row in sets):
             gate.warn("P8", "none of the agent user's permission sets grants Run Flows")
     checked_objects = checked_fields = 0
     if spec_path:
@@ -1365,6 +1548,12 @@ def gate_perms(path: str, org: str, spec_path: str | None = None,
                     gate.error("P10", f"the agent user cannot edit object `{obj}` "
                                       "(declared in `## Salesforce Data Access`)")
                 checked_objects += len(write_obj)
+            exempt = field_permission_exempt(gate, org, read_fld | write_fld)
+            if exempt:
+                gate.note("not permissionable, so readable with the object: "
+                          + ", ".join(sorted(exempt)))
+            read_fld = {(o, f) for o, f in read_fld if f not in exempt}
+            write_fld = {(o, f) for o, f in write_fld if f not in exempt}
             if read_fld:
                 fields = sorted({f for _, f in read_fld})
                 granted = {row["Field"] for row in soql(
@@ -1461,6 +1650,11 @@ def gate_doctor(state: str | None = None, org: str | None = None) -> Gate:
     gate.note("skills looked up in: " + ", ".join(str(r) for r in roots))
     platform, ga = platform_release_on(datetime.now(timezone.utc))
     gate.note(f"bundled latest platform release: {platform} GA {ga}")
+    age = (datetime.now(timezone.utc).date() - datetime.fromisoformat(ga).date()).days
+    if age > CALENDAR_STALE_DAYS:
+        gate.warn("D5", f"the bundled release calendar ends at {platform} ({ga}, {age} days "
+                        "ago): add the newer seasonal releases to PLATFORM_RELEASES, or "
+                        "RETEST T2 cannot see them")
     if state:
         for verdict, code, msg in retest_reasons(Path(state), org):
             gate.warn(code, msg)
@@ -1520,6 +1714,13 @@ def status(state: str, require: list[str], org: str | None = None) -> int:
     path = Path(state)
     with locked(path):
         data = json_of(path)
+    if isinstance(data.get("releases"), list):
+        raise CannotRun(f"{path.name} is a release log; pass the state file next to it "
+                        f"({path.with_name('state.json')})")
+    bad = [k for k, v in data.items() if not isinstance(v, dict) or "inputs" not in v]
+    if bad:
+        raise CannotRun(f"{path} is not a Malfoy state file (unexpected entries: "
+                        f"{', '.join(sorted(bad)[:3])})")
     ready = True
     for gate in require + [g for g in data if g not in require and g not in STATE_META]:
         entry = data.get(gate)

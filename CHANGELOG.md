@@ -23,6 +23,25 @@ Acknowledgements: thank **Arjun Gupta** and **Mohith Kumar** for feedback on Lin
 - **`observe` gate** (M1–M5). Post-launch check of `## Success Metric` against MessagingSession SOQL or `--input` JSON; warns below target (M4), never blocks release. Documents when Data Cloud observability is the faithful source.
 - Phase 7 in the playbook is mandatory: `testrun`, `observe`, and `status -o` for `RETEST`.
 
+### Fixed (first end-to-end run against a real sandbox)
+
+Every gate was run against a real full-copy sandbox with a dedicated read-only demo agent, a real `sf agent test run`, and messy records that exist in the org. The fakes in the unit tests had drifted from what the org and the CLI return; these are the fixes, each with a regression test built from the measured shapes.
+
+- **`testrun`** read a top-level `success` flag that `sf agent test run` never writes, so every real run failed T4. It now reads `testCases[].testResults[]` (bare file from `--output-dir` or the `--json` envelope), fails T4 per failed case with the failing assertions, and warns T5 when the case count differs from `tests.yaml`.
+- **`handoff --results`** parsed no rows from real output (wrong keys, `COMPLETED` read as "not passed"), so it passed without checking anything. It now reads `inputs.utterance`, `generatedData.actionsSequence` and `generatedData.topic`, checks failed handoff rows too, never flags non-handoff rows, and warns H11 when a handoff test has no result row.
+- **Escalation on the trace:** Testing Center reports `@utils.escalate` as the topic `human` with an empty action list. H8 and H10 accept `expectedTopic: human` / topic `human`; `examples/order-status` UC-04 uses it.
+- **`org_api_version`** queried `Organization.ApiVersion`, a column that does not exist: `testrun` on a pass, `status -o` and `doctor -o` exited 2. It now reads `apiVersion` from `sf org display`.
+- **`observe`** read `SELECT COUNT()` from `records` (always empty; the count is `totalSize`) and counted sessions created after the window instead of inside it. It now counts the window `[release, release + N days]` and says the MessagingSession proxy is org-wide.
+- **`coverage` C7/C11 and `perms` P13** lost `recordId` when another key (`expectedTopic`, …) came before it in the case, so the org checks of messy rows never ran. One parser now reads the whole case, in any key order, including `recordIds:` lists; tags anywhere in the comment block count.
+- **`perms` P11** failed on fields that have no `FieldPermissions` row by design (`CaseNumber`, `Status`, `LastModifiedDate`, `Name`). It reads `EntityParticle.IsPermissionable`: those fields follow the object, and a declared field the object does not have is a P11 error.
+- **`perms` P13** crashed (exit 2) when a test named a well-formed Id that is not in the org: UserRecordAccess fails the whole query with "invalid parameter value". It now retries Id by Id and reports the missing one as P13.
+- **`perms` P8** no longer counts an Omni-Channel `outbound_route_name` flow as a flow the agent user runs.
+- **`lint` L6** read 15-letter words such as `OmniChannelFlow` as record Ids. Ids now need the reserved `0` in position 6.
+- **`status`** given `releases.json` crashed with a `TypeError`; it now exits 2 with a clear message.
+- **Release calendar:** Winter '27 (GA 2026-10-12) added; `doctor` warns D5 when the newest bundled GA is over 150 days old.
+- A soft-wrapped `**Messy records:**` criterion is read whole; `## Success Metric` also parses Portuguese (`sem transferência`, `primeiros 30 dias`).
+- Documented: `sf agent test create` drops `recordId` (Malfoy-only key; the utterance must carry the record reference), and the platform reports prompt-injection attempts as the topic `Prompt_Injection`.
+
 ### Changed
 
 - Playbook, discovery reference and `examples/order-status` updated so the example passes the new gates.
