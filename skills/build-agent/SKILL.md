@@ -34,11 +34,11 @@ If `${CLAUDE_SKILL_DIR}` shows up unresolved, the script is at `scripts/gates.py
 |------|--------|-------|
 | `doctor` | `sf` on PATH, upstream skills installed | nothing |
 | `recon [REPO]` | prints the repo profile as JSON: packages, existing agents, rule files to read, CI, orgs | a DX project |
-| `spec SPEC.md` | every section present and filled, no template placeholder left, use cases have IDs, at least one guardrail. `--final`: every action is `EXISTS` | the spec |
+| `spec SPEC.md` | every section present and filled, no template placeholder left, use cases have IDs, at least one guardrail, structured `**Messy records:**` (S8). `--final`: every action is `EXISTS`; non-empty `## Salesforce Data Access` when actions exist (S9) | the spec |
 | `lint FILE.agent` | pitfalls the compiler does not report (codes L1 to L7). `--final`: unfinished markers become errors | the `.agent` |
-| `coverage SPEC.md TESTS.yaml` | every `UC-nn` in the spec is tagged on a test case; when the spec names a messy-record source, at least one test is tagged `# messy-data` | spec and tests |
+| `coverage SPEC.md TESTS.yaml` | every `UC-nn` in the spec is tagged on a test case; when the spec names a messy-record source, at least one test is tagged `# messy-data`. `-o ORG`: declared sandbox alias (C8), messy `recordId` rows exist and match the criterion (C11). `--final`: `recordId` required (C7) | spec and tests; `-o` needs an org |
 | `handoff SPEC.md FILE.agent` | live handoff promises match `@utils.escalate`, or the spec declares `**Handoff mode:** support-channels-only` with no transfer promise | spec and `.agent` |
-| `perms FILE.agent -o ORG` | the agent user exists, is active, can reach every Apex target, every Flow target exists and is active. With `--spec`, checks `## Salesforce Data Access` object and field reads/writes | an authenticated org |
+| `perms FILE.agent -o ORG` | the agent user exists, is active, can reach every Apex target, every Flow target exists and is active. With `--spec`, checks `## Salesforce Data Access` object and field reads/writes. With `--tests`, read-only `UserRecordAccess` on every `recordId` (P13) | an authenticated org |
 | `active AGENT -o ORG` | which version is `Active`, read from the org. `--version N` to require one. With `--state`, a pass appends to `releases.json` which files shipped as that version, with the commit | an authenticated org |
 | `status STATE.json` | what passed, failed, never ran, or went `STALE` because its input changed. `--require a,b,c`. Also the last release per org: `SHIPPED`, or `DRIFT` with the files changed since | the state file |
 
@@ -89,7 +89,7 @@ Read [references/platform-gotchas.md](references/platform-gotchas.md) before wri
 
 ### Phase 5: test
 
-Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). When the spec names a messy-record source, tag at least one case with `# messy-data` and set `recordId` (or `recordIds`) to a real row from that sandbox. Run `coverage`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in utterances too: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name.
+Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). When the spec names a messy-record source, tag at least one case with `# messy-data` and set `recordId` (or `recordIds`) to a real row from that sandbox. Run `coverage`, then `coverage -o` the declared sandbox and `perms --tests` on the build org before `--final`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in utterances too: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name.
 
 ### Phase 6: release
 

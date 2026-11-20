@@ -12,6 +12,9 @@ Acknowledgements: thank **Arjun Gupta** and **Mohith Kumar** for feedback on Lin
 
 - **`handoff` gate** (H1–H4). Fails when the spec promises a live transfer but the `.agent` has no `@utils.escalate`, when `**Handoff mode:** support-channels-only` still promises a transfer, or when that mode is declared while `@utils.escalate` remains wired.
 - **Messy real records in the contract.** `spec` rule S8 requires `**Messy records:**` or `**Realistic test data:**` under `## Environments` or `## Data & Privacy`. `coverage` rule C6 requires at least one test tagged `# messy-data` when that declaration exists; C7 warns when those tests omit `recordId` / `recordIds`.
+- **Structured messy-record source and org proof.** S8 now requires `org \`ALIAS\`; criterion: …` with machine-checkable tokens (`stale LastModifiedDate`, `empty \`Object.Field\``, optional `>(N)d`). With `coverage -o ORG`, C8 fails when that org is not the declared alias; C11 read-only SOQL checks each `# messy-data` `recordId` exists and matches the criterion. C7 is an error with `--final`.
+- **`## Salesforce Data Access` when there are actions.** S9 warns while actions exist but the table is empty, and errors with `--final`.
+- **Record visibility for the agent user.** `perms --tests TESTS.yaml` uses read-only `UserRecordAccess` on every `recordId` / `recordIds` in the tests (P13): field access alone does not prove the row is visible under OWD and sharing.
 - **`## Salesforce Data Access`** in the spec (optional table). `perms --spec` checks `ObjectPermissions` and `FieldPermissions` for declared reads and edits (P9–P12). Without the section, behaviour matches 0.2.0.
 - Unit tests for every new rule, with org answers faked as before.
 - README FAQ: which spec and tests shipped as which org version (`releases.json` + `DRIFT`).

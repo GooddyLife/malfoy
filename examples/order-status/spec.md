@@ -37,9 +37,9 @@ Reads: order status and estimated delivery. Collects: order number and email, us
 the lookup. Shows order details only after the lookup confirms the email belongs to the order.
 Stores nothing new.
 
-**Messy records:** partial-copy staging sandbox `Acme_Staging` (see Environments). Oldest
-customer accounts with missing emails, duplicate legacy order numbers and half-filled custom
-fields; not the clean rows from the builder's scratch org.
+**Messy records:** org `Acme_Staging`; criterion: stale LastModifiedDate (>730d), empty
+`Order__c.Customer_Email__c`, duplicate legacy order keys, half-filled custom fields (the
+partial-copy staging sandbox in Environments — not the builder's scratch org).
 
 ## Environments
 

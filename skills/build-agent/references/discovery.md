@@ -21,7 +21,7 @@ The first six are sections this skill adds. The rest come from the `agentforce-g
 | Success Metric | How will anyone know it worked, in a number, by when? | "70% of order-status chats end without a transfer, first 30 days." |
 | Out of Scope | What will it be asked that it must not do? | A short list. "Refunds. Address changes." |
 | Human Handoff | When does a person take over, and where does the conversation go? | The trigger and the queue. "On request, or after two failed lookups." If the agent will only point to email or phone with no `@utils.escalate`, add `**Handoff mode:** support-channels-only` and do not promise a transfer |
-| Data & Privacy | What does it read, write and collect? What may it show, and only after what check? | Named fields and the check that unlocks them. Add `**Messy records:**` naming which sandbox copy holds old or incomplete rows for testing |
+| Data & Privacy | What does it read, write and collect? What may it show, and only after what check? | Named fields and the check that unlocks them. Add `**Messy records:** org \`ALIAS\`; criterion: stale …, empty \`Object.Field\`, …` naming which sandbox holds old or incomplete rows for testing |
 | Environments | Which orgs, in what order, and who approves each move? | A table: stage, org, approver. Name a partial- or full-copy sandbox where realistic records live |
 
 ### Use case types

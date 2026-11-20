@@ -43,7 +43,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 <text class="anim label a5" x="28" y="282">Messy real records</text>
 <text class="anim cell o5" x="196" y="282">Not in the template</text>
 <path class="anim b5" d="M556 277 l4 4 l8 -9" fill="none" stroke="#3fb950" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-<text class="anim cell win b5" x="580" y="282">spec S8 + coverage C6 on sandbox rows</text>
+<text class="anim cell win b5" x="580" y="282"><tspan class="gate">S8</tspan> structure + coverage -o/C11 + perms P13</text>
 <rect x="1" y="294" width="878" height="34" fill="#11161d"/>
 <text class="anim label a6" x="28" y="316">Live handoff</text>
 <text class="anim cell o6" x="196" y="316">Instructions only</text>
