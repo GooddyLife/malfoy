@@ -23,6 +23,8 @@ ROWS = [  # label, the official skills on their own, the same skills conducted b
     ("Edited after a pass", "Nothing records it", "STALE"),
     ("Spec per version", "Saved, not tied to what shipped", "active logs version, hashes, commit"),
     ("Your repo's rules", "Not looked for", "Read first. They override his"),
+    ("Platform season", "Shipped agents stay unretested", "testrun + RETEST in status"),
+    ("Success Metric live", "Written, never checked", "observe: warn if below target"),
 ]
 GATES = ("coverage", "handoff", "perms", "lint", "active", "STALE", "S8")
 CLOSING = "The official skills do the building. Malfoy makes them prove it."

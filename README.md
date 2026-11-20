@@ -86,7 +86,7 @@ Eight phases. He does not skip, and he says which one he is in.
 | 4 | Build | Writes the Agent Script, compiles it | compile is clean, `lint`, `handoff` and `perms` pass |
 | 5 | Test | Preview with traces, Testing Center suite, security probing | `coverage` passes and every test passes on trace evidence |
 | 6 | Release | Sandbox, then staging, then production, each by your rules | `status` is `READY`; `active` proves the version, per org |
-| 7 | Observe | Reads real sessions once they exist | optional |
+| 7 | Observe | Success Metric and platform re-test | `testrun`, `observe`, `status -o` for `RETEST` |
 
 People new to Agentforce get one question at a time, with an example answer. People who hand him a finished spec get it checked, not re-asked. The gates are the same for both.
 
@@ -138,7 +138,9 @@ One file, standard library only, Python 3.9+. It reads; it never writes to an or
 | `handoff` | the spec promises a live transfer (in `## Human Handoff` or a `handoff` use case) but the `.agent` has no `@utils.escalate`, or `support-channels-only` is declared while a transfer is still promised (H1–H4) |
 | `perms` | the agent user is missing or inactive, cannot reach an Apex class an action targets, or a Flow target is missing or has no active version. With `--spec` and `## Salesforce Data Access`, also fails when object or field access is missing (P9–P12) |
 | `active` | the agent has no active version in the org, or not the one you expected. On a pass it records which spec, tests and agent file shipped as that version, with the commit |
-| `status` | any required gate failed, never ran, or passed on a file that has changed since. Also shows, per org, whether the files still match the last release (`SHIPPED`) or have moved on (`DRIFT`) |
+| `testrun` | there is no evidence of a passing agent test run. On success it records org API version and platform release for later `RETEST` hints |
+| `observe` | the Success Metric cannot be parsed, session data is missing, or the measured rate is below target (warn only) |
+| `status` | any required gate failed, never ran, or passed on a file that has changed since. Also shows `SHIPPED` / `DRIFT` per org and `RETEST` when a shipped agent should run its suite again |
 
 Real output, from [`examples/order-status`](examples/order-status):
 

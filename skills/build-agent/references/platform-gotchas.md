@@ -64,6 +64,14 @@ Measured on a sandbox with Salesforce CLI 2.140 and a published Agent Script age
 
 `sf project delete source` on the `Bot`, `GenAiPlannerBundle` and `AiAuthoringBundle` of a published agent fails with `invalid cross reference id`: the pieces reference each other. Deactivate it (`sf agent deactivate`, then `gates.py active` to prove it), and delete it in Setup. A draft that was never published can be deleted with the CLI. Use names that make a test agent obvious.
 
+## SHIPPED agents still need tests after a platform season
+
+Malfoy does not know your org's patch version. It compares the last recorded passing `testrun` (in `state.json`) to a bundled list of seasonal GA dates and to `Organization.ApiVersion`. When `status` or `doctor` prints `RETEST`, re-run the agent suite and `testrun` before trusting production behaviour. Patch-only Salesforce changes are not detected.
+
+## Success Metric data is usually not plain SOQL
+
+`gates.py observe` uses `MessagingSession` as a read-only proxy (bot sessions; transfer ≈ `EndedByType = 'BotToAgent'` or `CaseId` set). Agentforce Session Tracing and escalation rates in production often live in Data Cloud / Tableau Next. When M5 fires, pass documented counts with `--input` or use `agentforce-observe`.
+
 ## The CLI fails intermittently
 
 During one session, `sf agent preview` returned `Agent ... not found` and `read EINVAL` between calls that worked, `sf agent test run` lost its poll the same way, and `sf agent publish` once failed with `Error refreshing connection`. Retrying worked each time. Before retrying a publish, query `BotVersion` to see whether the first attempt created a version. A lost test poll can be resumed with `sf agent test results --job-id`.

@@ -16,6 +16,9 @@ Acknowledgements: thank **Arjun Gupta** and **Mohith Kumar** for feedback on Lin
 - Unit tests for every new rule, with org answers faked as before.
 - README FAQ: which spec and tests shipped as which org version (`releases.json` + `DRIFT`).
 - Comparison table rows for messy records and live handoff.
+- **`testrun` gate** (T1–T4). Records a passing agent test run in `state.json` (`test_run`: timestamp, org API version, bundled platform release, hash of `tests.yaml`). `status` and `doctor --state` emit `RETEST` (T1–T3) when a `SHIPPED` org needs the suite again after a seasonal GA or API upgrade; bundled GA dates are deterministic, patch levels are not.
+- **`observe` gate** (M1–M5). Post-launch check of `## Success Metric` against MessagingSession SOQL or `--input` JSON; warns below target (M4), never blocks release. Documents when Data Cloud observability is the faithful source.
+- Phase 7 in the playbook is mandatory: `testrun`, `observe`, and `status -o` for `RETEST`.
 
 ### Changed
 

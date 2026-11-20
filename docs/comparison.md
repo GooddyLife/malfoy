@@ -29,6 +29,8 @@ It is not a benchmark. Nothing here measures whether agents built one way fail l
 | A file edited after its check passed | `agentforce-test/SKILL.md` tells the model to rewrite the security suite after any change to the agent. It is an instruction: no file records which version of an input a check ran on, so nothing detects the edit | `status` in `gates.py` compares a hash of each input |
 | Which spec shipped as which version | `agentforce-generate/SKILL.md` saves the spec to `<AgentName>-AgentSpec.md` in the project. Searching the nine skills for a record of the published version next to the spec, or a hash of it, returns none: the only hashes are in `agentforce-hyperclassifier-configure` and `agentforce-offline-experimentation-run`, for experiment inputs | `record_release` and the release lines of `status` in `gates.py` |
 | Your repo's deploy and approval rules | Searching the nine skills for `CLAUDE.md`, `AGENTS.md` or `CONTRIBUTING` returns no file. The design reference does tell the model to scan existing code and project metadata for context before asking questions | Phase 0 and `references/repo-recon.md` |
+| Seasonal platform releases | No record of when tests last passed; shipped agents are never prompted to re-test | `testrun` + `RETEST` lines in `status` / `doctor` (T1–T3) |
+| Success Metric after go-live | The template asks for a metric; none of the nine skills checks it against live traffic | `observe` in `gates.py` (M1–M5; warn only) |
 
 ## Where upstream already covers the ground
 

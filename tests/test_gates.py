@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -323,6 +324,98 @@ class ReleaseLogTest(unittest.TestCase):
         (self.folder / "spec.md").write_text(SPEC + "\nchanged\n", encoding="utf-8")
         _, out = self.run_gate("status", self.state)
         self.assertRegex(out, r"DRIFT\s+fake\s+v2 .*changed since: spec\.md")
+
+
+class ObservabilityTest(unittest.TestCase):
+    def setUp(self):
+        original = gates.soql
+        self.addCleanup(setattr, gates, "soql", original)
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.folder = Path(self.dir.name)
+        self.state = str(self.folder / "state.json")
+        self.tests = str(self.folder / "tests.yaml")
+        Path(self.tests).write_text(TESTS, encoding="utf-8")
+
+    def write_release(self, org="fake", at="2025-06-01T00:00:00+00:00"):
+        log = self.folder / "releases.json"
+        log.write_text(json.dumps({"releases": [{
+            "org": org, "version": 1, "at": at, "inputs": {"spec.md": "abc"},
+        }]}), encoding="utf-8")
+
+    def test_platform_release_calendar_is_deterministic(self):
+        release, ga = gates.platform_release_on(datetime(2025, 8, 1, tzinfo=timezone.utc))
+        self.assertEqual((release, ga), ("Summer '25", "2025-06-17"))
+        newer = gates.newer_platform_releases("2024-06-01T00:00:00+00:00")
+        self.assertIn(("Summer '24", "2024-06-10"), newer)
+
+    def test_testrun_records_api_and_platform_in_state(self):
+        gates.soql = FakeOrg(Organization=[{"ApiVersion": "65.0"}])
+        code = gates.main(["testrun", self.tests, "-o", "fake", "--pass", "--state", self.state])
+        self.assertEqual(code, 0)
+        run = json.loads(Path(self.state).read_text())["test_run"]
+        self.assertTrue(run["ok"])
+        self.assertEqual(run["org_api_version"], "65.0")
+        self.assertIn("platform_release", run)
+
+    def test_status_retest_when_platform_moves_on(self):
+        gates.soql = FakeOrg(Organization=[{"ApiVersion": "65.0"}])
+        self.write_release(at="2025-01-01T00:00:00+00:00")
+        Path(self.state).write_text(json.dumps({
+            "test_run": {"ok": True, "at": "2025-01-01T00:00:00+00:00", "org": "fake",
+                         "org_api_version": "65.0", "platform_release": "Winter '24",
+                         "inputs": {"tests.yaml": "abc"}},
+        }), encoding="utf-8")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            gates.status(self.state, ["spec"])
+        self.assertRegex(out.getvalue(), r"RETEST\s+T2")
+
+    def test_status_retest_when_api_version_changes(self):
+        self.write_release()
+        gates.record_test_run(self.state, "fake", self.tests, True, "65.0", "Summer '26")
+        gates.soql = FakeOrg(Organization=[{"ApiVersion": "66.0"}])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            gates.status(self.state, ["spec"], org="fake")
+        self.assertRegex(out.getvalue(), r"RETEST\s+T3")
+
+    def test_observe_warns_below_target_with_input(self):
+        spec = self.file("spec.md", SPEC)
+        self.write_release(at="2020-01-01T00:00:00+00:00")
+        metrics = self.file("metrics.json", json.dumps({
+            "total_sessions": 100, "sessions_without_transfer": 50,
+            "source": "Tableau export (example)",
+        }))
+        gate = gates.gate_observe(spec, "fake", self.state, metrics)
+        self.assertIn("M4", self.codes(gate))
+
+    def test_observe_uses_messaging_session_counts(self):
+        spec = self.file("spec.md", SPEC)
+        self.write_release(at="2020-01-01T00:00:00+00:00")
+        gates.soql = FakeOrg(
+            MessagingSession=[{"expr0": 10}],
+        )
+        calls = []
+
+        def counting(org, query):
+            calls.append(query)
+            if "CaseId" in query:
+                return [{"expr0": 3}]
+            return [{"expr0": 10}]
+
+        gates.soql = counting
+        gate = gates.gate_observe(spec, "fake", self.state, None)
+        self.assertNotIn("M4", self.codes(gate))
+        self.assertEqual(len(calls), 2)
+
+    def file(self, name: str, content: str) -> str:
+        path = self.folder / name
+        path.write_text(content, encoding="utf-8")
+        return str(path)
+
+    def codes(self, gate) -> set:
+        return {code for code, _, _ in gate.errors + gate.warns}
 
 
 if __name__ == "__main__":

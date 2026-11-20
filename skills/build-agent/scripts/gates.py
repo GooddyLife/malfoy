@@ -11,7 +11,12 @@
     gates.py perms FILE.agent -o ORG --spec SPEC.md   optional object/field access from the spec
     gates.py active AGENT -o ORG [--version N]   which version is active, from the org;
                                              with --state, a pass is logged in releases.json
+    gates.py testrun TESTS.yaml -o ORG       record a passing agent test run in the state file
+                                             (--result-json from sf agent test run, or --pass)
+    gates.py observe SPEC.md -o ORG            compare live sessions to the Success Metric
+                                             (--input JSON when MessagingSession is unavailable)
     gates.py status STATE.json [--require a,b]   what passed, what failed, what went stale
+                                             (-o ORG for platform/API re-test hints on SHIPPED)
 
 Exit code: 0 pass, 1 fail, 2 could not run. With --state FILE a gate records its
 result and a hash of its input files, so `status` can tell "passed" from "passed
@@ -29,7 +34,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager, suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REQUIRED_SKILLS = ["agentforce-generate", "agentforce-persona-generate", "agentforce-test"]
@@ -67,7 +72,17 @@ SALESFORCE_OBJECT = re.compile(r"`([A-Za-z_][\w]*(?:__c)?)`")
 TOP_BLOCK = re.compile(r"^([A-Za-z_]\w*)(?:\s+[\w.]+)?\s*:")
 LITERAL_BLOCK = re.compile(r"^(\s*)[\w.\-]+\s*:\s*\|[+-]?\d*\s*$")
 SF_TIMEOUT = int(os.environ.get("MALFOY_SF_TIMEOUT", "120"))  # seconds per sf call
+STATE_META = frozenset({"test_run"})  # not gates; do not list in `status` as PASS/FAIL
 RECORD_ID = re.compile(r"""["'](0[0-9A-Za-z]{14}(?:[0-9A-Za-z]{3})?)["']""")
+# Bundled GA dates for seasonal Salesforce releases (calendar is deterministic; patch level is not).
+PLATFORM_RELEASES = [
+    ("Winter '24", "2023-10-13"), ("Spring '24", "2024-02-26"), ("Summer '24", "2024-06-10"),
+    ("Winter '25", "2024-10-14"), ("Spring '25", "2025-02-25"), ("Summer '25", "2025-06-17"),
+    ("Winter '26", "2025-10-14"), ("Spring '26", "2026-02-24"), ("Summer '26", "2026-06-16"),
+]
+SUCCESS_PCT = re.compile(
+    r"(\d+)\s*%.*?without\s+(?:a\s+)?transfer", re.I | re.S)
+SUCCESS_WINDOW = re.compile(r"(?:first|over\s+the\s+first)\s+(\d+)\s+days?", re.I)
 
 
 class CannotRun(Exception):
@@ -194,6 +209,202 @@ def git_head(folder: Path, files: list[str]) -> tuple[str | None, bool]:
     if head.returncode:
         return None, False
     return head.stdout.strip(), bool(run("status", "--porcelain", "--", *files).stdout.strip())
+
+
+def platform_release_on(day: datetime) -> tuple[str, str]:
+    """Latest bundled seasonal release whose GA date is on or before `day` (UTC)."""
+    stamp = day.date().isoformat()
+    name, ga = PLATFORM_RELEASES[0]
+    for candidate, date in PLATFORM_RELEASES:
+        if date <= stamp:
+            name, ga = candidate, date
+    return name, ga
+
+
+def newer_platform_releases(iso_timestamp: str) -> list[tuple[str, str]]:
+    day = iso_timestamp[:10]
+    return [(name, ga) for name, ga in PLATFORM_RELEASES if ga > day]
+
+
+def org_api_version(org: str) -> str | None:
+    rows = soql(org, "SELECT ApiVersion FROM Organization LIMIT 1")
+    return str(rows[0]["ApiVersion"]) if rows else None
+
+
+def record_test_run(state: str, org: str, tests_path: str, ok: bool,
+                    api_version: str | None = None, platform: str | None = None):
+    path = Path(state)
+    if platform is None:
+        platform, _ = platform_release_on(datetime.now(timezone.utc))
+    with locked(path):
+        data = json_of(path)
+        data["test_run"] = {
+            "ok": ok, "at": now(), "org": org,
+            "org_api_version": api_version,
+            "platform_release": platform,
+            "inputs": {relative_to(tests_path, path.parent): digest(tests_path)},
+        }
+        write_json(path, data)
+
+
+def retest_reasons(state: Path, org: str | None) -> list[tuple[str, str, str]]:
+    """(verdict, code, message) when a SHIPPED agent may need its suite re-run."""
+    data = json_of(state)
+    run = data.get("test_run")
+    log = state.with_name("releases.json")
+    with locked(log):
+        releases = json_of(log).get("releases", [])
+    latest = {r["org"]: r for r in releases}
+    reasons: list[tuple[str, str, str]] = []
+    targets = [org] if org else sorted(latest)
+    for target in targets:
+        if target not in latest:
+            continue
+        if not run or not run.get("ok"):
+            reasons.append(("RETEST", "T1",
+                            f"{target}: no passing test run in state — rerun agent tests "
+                            "and record with `testrun`"))
+            continue
+        if run.get("org") and run["org"] != target:
+            continue
+        for name, ga in newer_platform_releases(run["at"]):
+            reasons.append(("RETEST", "T2",
+                            f"{target}: last passing test {run['at'][:10]} predates "
+                            f"{name} GA ({ga}); rerun the suite on this org"))
+        if org:
+            live = org_api_version(org)
+            recorded = run.get("org_api_version")
+            if live and recorded and live != recorded:
+                reasons.append(("RETEST", "T3",
+                                f"{target}: test run recorded API {recorded}; org is "
+                                f"now {live}; rerun the suite"))
+    return reasons
+
+
+def parse_success_metric(spec: str) -> tuple[int, int] | None:
+    _, body = sections(spec).get("success metric", (0, []))
+    text = "\n".join(body).strip()
+    if not text:
+        return None
+    pct = SUCCESS_PCT.search(text)
+    window = SUCCESS_WINDOW.search(text)
+    if not pct or not window:
+        return None
+    return int(pct.group(1)), int(window.group(1))
+
+
+def activation_time(state: Path, org: str) -> datetime | None:
+    log = state.with_name("releases.json")
+    with locked(log):
+        releases = json_of(log).get("releases", [])
+    for entry in reversed(releases):
+        if entry.get("org") == org and entry.get("at"):
+            return datetime.fromisoformat(entry["at"])
+    return None
+
+
+def session_transfer_counts(org: str, since_iso: str) -> tuple[int, int, str] | None:
+    """(total sessions, sessions without transfer proxy, data source note), or None if SOQL fails."""
+    since = since_iso.replace("+00:00", "Z")
+    try:
+        total_rows = soql(org, "SELECT COUNT() FROM MessagingSession "
+                              f"WHERE CreatedDate >= {since} "
+                              "AND AgentType IN ('Bot', 'Agent Bot')")
+        total = total_rows[0].get("expr0", 0) if total_rows else 0
+        escalated_rows = soql(org, "SELECT COUNT() FROM MessagingSession "
+                                    f"WHERE CreatedDate >= {since} "
+                                    "AND AgentType IN ('Bot', 'Agent Bot') "
+                                    "AND (EndedByType = 'BotToAgent' OR CaseId != null)")
+        escalated = escalated_rows[0].get("expr0", 0) if escalated_rows else 0
+    except CannotRun:
+        return None
+    note = ("MessagingSession counts (bot sessions; transfer ≈ BotToAgent end or CaseId set). "
+            "This is a SOQL proxy — not Agentforce Session Tracing in Data Cloud.")
+    return total, max(total - escalated, 0), note
+
+
+def gate_testrun(tests_path: str, org: str, result_json: str | None, passed: bool) -> Gate:
+    gate = Gate("testrun")
+    ok = False
+    if result_json:
+        try:
+            payload = json.loads(Path(result_json).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            raise CannotRun(f"cannot read test result JSON: {exc}") from exc
+        ok = bool(payload.get("success", payload.get("passed", False)))
+        if not ok:
+            gate.error("T4", "agent test result JSON does not report success", result_json)
+    elif passed:
+        ok = True
+    else:
+        gate.error("T4", "pass `--pass` or a successful `--result-json` from `sf agent test run`")
+    if ok:
+        version = org_api_version(org)
+        platform, _ = platform_release_on(datetime.now(timezone.utc))
+        gate.note(f"org API {version or 'unknown'}; bundled platform release {platform}")
+    gate.tests_ok = ok
+    return gate
+
+
+def gate_observe(spec_path: str, org: str, state: str | None, input_path: str | None) -> Gate:
+    gate = Gate("observe")
+    metric = parse_success_metric(text_of(spec_path))
+    if metric is None:
+        gate.warn("M1", "could not parse `## Success Metric` "
+                        "(expected e.g. `70% ... without transfer` and `first 30 days`)")
+        return gate
+    target_pct, window_days = metric
+    if not state:
+        gate.warn("M5", "pass `--state` so the window can start from the release recorded "
+                        "in `releases.json`, or pass `--input` with manual counts")
+        return gate
+    started = activation_time(Path(state), org)
+    if started is None:
+        gate.warn("M5", f"no release for org `{org}` in releases.json — cannot anchor the "
+                        f"{window_days}-day window")
+        return gate
+    end = started + timedelta(days=window_days)
+    now_utc = datetime.now(timezone.utc)
+    if now_utc < started:
+        gate.note(f"measurement window has not started (release {started.date().isoformat()})")
+        return gate
+    since = min(now_utc, end)
+    if now_utc < end:
+        gate.note(f"day {(now_utc - started).days + 1} of {window_days} — provisional check only")
+
+    total = without = 0
+    source = ""
+    if input_path:
+        try:
+            manual = json.loads(Path(input_path).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            raise CannotRun(f"cannot read --input: {exc}") from exc
+        total = int(manual["total_sessions"])
+        without = int(manual.get("sessions_without_transfer",
+                                 manual.get("without_transfer", 0)))
+        source = manual.get("source", "JSON file passed to --input")
+        gate.note(f"using documented input: {source}")
+    else:
+        counts = session_transfer_counts(org, started.isoformat(timespec="seconds"))
+        if counts is None:
+            gate.warn("M5", "MessagingSession is not queryable in this org (permissions or "
+                            "channel). Pass `--input` with "
+                            '`{"total_sessions": N, "sessions_without_transfer": M, '
+                            '"source": "..."}` from Tableau Next / observability exports')
+            return gate
+        total, without, source = counts
+        gate.note(source)
+
+    if total == 0:
+        gate.warn("M5", "no bot MessagingSession rows in the window — metric stays unmeasured")
+        return gate
+    actual = round(100 * without / total, 1)
+    gate.note(f"{without}/{total} sessions without transfer proxy ({actual}%) "
+              f"vs target {target_pct}%")
+    if actual < target_pct:
+        gate.warn("M4", f"actual {actual}% is below the {target_pct}% Success Metric "
+                        f"for the first {window_days} days (does not block release)")
+    return gate
 
 
 def record_release(state: str, org: str, version: int) -> str:
@@ -678,7 +889,7 @@ def skill_roots() -> list[Path]:
             home / ".claude/skills", home / ".agents/skills"]
 
 
-def gate_doctor() -> Gate:
+def gate_doctor(state: str | None = None, org: str | None = None) -> Gate:
     gate = Gate("doctor")
     if sys.version_info < (3, 9):
         gate.error("D1", f"Python 3.9+ needed, this is {sys.version.split()[0]}")
@@ -696,6 +907,14 @@ def gate_doctor() -> Gate:
         else:
             gate.warn("D4", f"optional skill `{name}` is not installed")
     gate.note("skills looked up in: " + ", ".join(str(r) for r in roots))
+    platform, ga = platform_release_on(datetime.now(timezone.utc))
+    gate.note(f"bundled latest platform release: {platform} GA {ga}")
+    if state:
+        for verdict, code, msg in retest_reasons(Path(state), org):
+            gate.warn(code, msg)
+    elif org:
+        gate.warn("T1", "pass `--state` with `-o` to check whether a SHIPPED agent needs "
+                        "its test suite re-run after a platform or API change")
     return gate
 
 
@@ -745,12 +964,12 @@ def recon(repo: str, orgs: bool = True) -> dict:
     return profile
 
 
-def status(state: str, require: list[str]) -> int:
+def status(state: str, require: list[str], org: str | None = None) -> int:
     path = Path(state)
     with locked(path):
         data = json_of(path)
     ready = True
-    for gate in require + [g for g in data if g not in require]:
+    for gate in require + [g for g in data if g not in require and g not in STATE_META]:
         entry = data.get(gate)
         if entry is None:
             verdict = "MISSING"
@@ -765,10 +984,12 @@ def status(state: str, require: list[str]) -> int:
     with locked(log):
         releases = json_of(log).get("releases", [])
     latest = {release["org"]: release for release in releases}  # the log is in time order
-    for org, release in latest.items():  # informational: drift is not a failed gate
+    for ship_org, release in latest.items():  # informational: drift is not a failed gate
         changed = changed_inputs(path.parent, release["inputs"])
-        print(f"{'DRIFT' if changed else 'SHIPPED':8}{org:10}v{release['version']} "
+        print(f"{'DRIFT' if changed else 'SHIPPED':8}{ship_org:10}v{release['version']} "
               f"{release['at']}" + (f"  changed since: {', '.join(changed)}" if changed else ""))
+    for verdict, code, msg in retest_reasons(path, org):
+        print(f"{verdict:8}{code:10}{msg}")
     print("READY: every required gate passed on the current files" if ready else
           "NOT READY: fix the gates above, then run them again")
     return 0 if ready else 1
@@ -780,7 +1001,9 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="gates.py", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="gate", required=True)
-    sub.add_parser("doctor")
+    p = sub.add_parser("doctor")
+    p.add_argument("--state", help="state file with test_run evidence and releases.json")
+    p.add_argument("-o", "--org", help="org alias to check platform/API re-test hints")
     p = sub.add_parser("recon"); p.add_argument("repo", nargs="?", default=".")
     p.add_argument("--no-orgs", action="store_true")
     p = sub.add_parser("spec"); p.add_argument("spec"); p.add_argument("--final", action="store_true")
@@ -791,14 +1014,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--spec", help="spec with optional ## Salesforce Data Access for object/field checks")
     p = sub.add_parser("active"); p.add_argument("agent"); p.add_argument("-o", "--org", required=True)
     p.add_argument("--version", type=int)
+    p = sub.add_parser("testrun"); p.add_argument("tests")
+    p.add_argument("-o", "--org", required=True)
+    p.add_argument("--result-json", help="JSON from `sf agent test run --result-format json`")
+    p.add_argument("--pass", dest="record_pass", action="store_true",
+                   help="record success without reading JSON")
+    p = sub.add_parser("observe"); p.add_argument("spec")
+    p.add_argument("-o", "--org", required=True)
+    p.add_argument("--input", help="manual counts JSON when session SOQL is unavailable")
     p = sub.add_parser("status"); p.add_argument("state")
     p.add_argument("--require", default="spec,lint,coverage")
-    for name in ("spec", "lint", "coverage", "handoff", "perms", "active"):
+    p.add_argument("-o", "--org", help="limit platform/API re-test hints to one org")
+    for name in ("spec", "lint", "coverage", "handoff", "perms", "active", "testrun", "observe"):
         sub.choices[name].add_argument("--state", help="JSON file to record the result in")
     a = parser.parse_args(argv)
     try:
         if a.gate == "doctor":
-            return gate_doctor().finish()
+            return gate_doctor(getattr(a, "state", None), getattr(a, "org", None)).finish()
         if a.gate == "recon":
             print(json.dumps(recon(a.repo, not a.no_orgs), indent=2))
             return 0
@@ -819,7 +1051,16 @@ def main(argv: list[str] | None = None) -> int:
             if code == 0 and a.state:
                 print(f"NOTE  active  {record_release(a.state, a.org, gate.live)}")
             return code
-        return status(a.state, [g for g in a.require.split(",") if g])
+        if a.gate == "testrun":
+            gate = gate_testrun(a.tests, a.org, a.result_json, a.record_pass)
+            code = gate.finish(a.state, [a.tests])
+            if code == 0 and a.state and getattr(gate, "tests_ok", False):
+                version = org_api_version(a.org)
+                record_test_run(a.state, a.org, a.tests, True, version)
+            return code
+        if a.gate == "observe":
+            return gate_observe(a.spec, a.org, a.state, a.input).finish(a.state, [a.spec])
+        return status(a.state, [g for g in a.require.split(",") if g], getattr(a, "org", None))
     except CannotRun as exc:
         print(f"CANNOT RUN  {a.gate}  {exc}", file=sys.stderr)
         return 2

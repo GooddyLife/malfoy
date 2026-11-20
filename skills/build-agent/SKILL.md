@@ -40,7 +40,9 @@ If `${CLAUDE_SKILL_DIR}` shows up unresolved, the script is at `scripts/gates.py
 | `handoff SPEC.md FILE.agent` | live handoff promises match `@utils.escalate`, or the spec declares `**Handoff mode:** support-channels-only` with no transfer promise | spec and `.agent` |
 | `perms FILE.agent -o ORG` | the agent user exists, is active, can reach every Apex target, every Flow target exists and is active. With `--spec`, checks `## Salesforce Data Access` object and field reads/writes | an authenticated org |
 | `active AGENT -o ORG` | which version is `Active`, read from the org. `--version N` to require one. With `--state`, a pass appends to `releases.json` which files shipped as that version, with the commit | an authenticated org |
-| `status STATE.json` | what passed, failed, never ran, or went `STALE` because its input changed. `--require a,b,c`. Also the last release per org: `SHIPPED`, or `DRIFT` with the files changed since | the state file |
+| `testrun TESTS.yaml -o ORG` | records a passing agent test run in the state file (`test_run`: time, org API version, bundled platform release, hash of `tests.yaml`). Use `--result-json` from `sf agent test run` or `--pass` after trace evidence. Rules T1–T4 | an authenticated org |
+| `observe SPEC.md -o ORG` | after go-live, compares the `## Success Metric` to live data. Warns on M4 when below target; never blocks release. Uses MessagingSession SOQL when it works, else `--input` JSON with documented counts from observability exports. Rules M1–M5 | an authenticated org and `--state` |
+| `status STATE.json` | what passed, failed, never ran, or went `STALE` because its input changed. `--require a,b,c`. Also the last release per org: `SHIPPED`, or `DRIFT` with the files changed since; `RETEST` lines (T1–T3) when the suite should run again after a seasonal release or org API change (`-o ORG`) | the state file |
 
 Exit code 0 is pass, 1 is fail, 2 means the gate could not run (say so; it is not a pass). When a gate fails, fix the cause and run it again. Do not argue with it, and do not move on with a `STALE` gate.
 
@@ -55,7 +57,7 @@ Exit code 0 is pass, 1 is fail, 2 means the gate could not run (say so; it is no
 | 4 | Build | `agentforce-generate` | local compile clean, `lint`, `handoff`, `perms` |
 | 5 | Test | `agentforce-test` | `coverage`, every test passing on trace evidence |
 | 6 | Release | `agentforce-generate` | `status`, `spec --final`, `lint --final`, `handoff`, then `perms` and `active` per org |
-| 7 | Observe | `agentforce-observe`, `agentforce-d360-analyze` | optional |
+| 7 | Observe | `agentforce-observe`, `agentforce-d360-analyze` | `testrun` after Phase 5; `observe` once the Success Metric window has traffic; `status -o` for `RETEST` |
 
 Keep every artifact of one agent in `.malfoy/<AgentApiName>/`: `spec.md`, `tests.yaml`, `state.json`, `releases.json`. Unless the repo's rules say otherwise, suggest committing the folder with the agent: the commits in `releases.json` then show what changed in the spec between any two versions.
 
@@ -89,7 +91,7 @@ Read [references/platform-gotchas.md](references/platform-gotchas.md) before wri
 
 ### Phase 5: test
 
-Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). When the spec names a messy-record source, tag at least one case with `# messy-data` and set `recordId` (or `recordIds`) to a real row from that sandbox. Run `coverage`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in utterances too: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name.
+Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). When the spec names a messy-record source, tag at least one case with `# messy-data` and set `recordId` (or `recordIds`) to a real row from that sandbox. Run `coverage`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in utterances too: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name. When the suite passes, run `testrun` with `--state` so `status` can tell when a later Salesforce release or org API upgrade means re-testing a `SHIPPED` agent.
 
 ### Phase 6: release
 
@@ -103,7 +105,13 @@ Run `status --require spec,lint,coverage,handoff,perms`, then `spec --final`, `l
 
 ### Phase 7: observe
 
-Once real sessions exist, offer `agentforce-observe` or `agentforce-d360-analyze`. Use `agentforce-hyperclassifier-configure` and `agentforce-offline-experimentation-run` only when asked; replaying real conversations through another model moves customer data, so confirm the data may leave the org first.
+This phase is mandatory after go-live, not optional prose.
+
+1. **Re-test when the platform moves.** On a schedule and before major changes, run `status STATE.json -o ORG`. Treat every `RETEST` line (T1–T3) as work: no recorded passing test, a bundled seasonal GA after the last run, or the org API version no longer matches what was recorded. Re-run the agent test suite and `testrun` with `--state`.
+2. **Success Metric.** Parse the window from `## Success Metric` (anchor: `releases.json` `at` for that org). Run `observe SPEC.md -o ORG --state STATE.json`. It warns on M4 when the rate is below target; it does not fail the release. If MessagingSession is not a faithful view (common for Agentforce Session Tracing in Data Cloud), export counts from observability and pass `--input` with `total_sessions`, `sessions_without_transfer`, and a `source` string you can cite.
+3. **Deep dives.** Offer `agentforce-observe` or `agentforce-d360-analyze` when the gates flag a problem or the user asks. Use `agentforce-hyperclassifier-configure` and `agentforce-offline-experimentation-run` only when asked; replaying real conversations through another model moves customer data, so confirm the data may leave the org first.
+
+`doctor --state STATE.json -o ORG` surfaces the same `RETEST` warnings as a pre-flight check.
 
 ## Examples
 
@@ -118,5 +126,7 @@ Once real sessions exist, offer `agentforce-observe` or `agentforce-d360-analyze
 - **`CANNOT RUN ... sf is not on PATH`:** the Salesforce CLI is missing or the shell cannot see it. Org gates cannot run; say so instead of skipping them.
 - **`doctor` reports D3:** a required upstream skill is not in the folders it looked in. Run `scripts/install-upstream.sh`, or set `MALFOY_SKILL_ROOTS` if the skills live somewhere else.
 - **`status` says `STALE`:** a file changed after its gate passed. Run that gate again.
+- **`status` or `doctor` says `RETEST`:** the agent is still `SHIPPED` but the recorded test run predates a newer bundled Salesforce GA and/or the org API version changed. Re-run tests and `testrun`.
+- **`observe` M5:** session data is not available through the SOQL proxy. Use `--input` with documented counts, or enable Agentforce Session Tracing and Tableau Next per `agentforce-observe`.
 - **`perms` P5:** the agent user has no access to an Apex class. Add the class to a permission set assigned to that user, deploy, run `perms` again.
 - **The org has no Testing Center:** run preview tests only, and write in the release notes that the batch suite did not run.
