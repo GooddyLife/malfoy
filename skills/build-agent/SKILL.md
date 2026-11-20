@@ -36,9 +36,9 @@ If `${CLAUDE_SKILL_DIR}` shows up unresolved, the script is at `scripts/gates.py
 | `recon [REPO]` | prints the repo profile as JSON: packages, existing agents, rule files to read, CI, orgs | a DX project |
 | `spec SPEC.md` | every section present and filled, no template placeholder left, use cases have IDs, at least one guardrail, structured `**Messy records:**` (S8). `--final`: every action is `EXISTS`; non-empty `## Salesforce Data Access` when actions exist (S9) | the spec |
 | `lint FILE.agent` | pitfalls the compiler does not report (codes L1 to L7). `--final`: unfinished markers become errors | the `.agent` |
-| `coverage SPEC.md TESTS.yaml` | every `UC-nn` in the spec is tagged on a test case; when the spec names a messy-record source, at least one test is tagged `# messy-data`. `-o ORG`: declared sandbox alias (C8), messy `recordId` rows exist and match the criterion (C11). `--final`: `recordId` required (C7) | spec and tests; `-o` needs an org |
-| `handoff SPEC.md FILE.agent` | live handoff promises match `@utils.escalate`, or the spec declares `**Handoff mode:** support-channels-only` with no transfer promise | spec and `.agent` |
-| `perms FILE.agent -o ORG` | the agent user exists, is active, can reach every Apex target, every Flow target exists and is active. With `--spec`, checks `## Salesforce Data Access` object and field reads/writes. With `--tests`, read-only `UserRecordAccess` on every `recordId` (P13) | an authenticated org |
+| `coverage SPEC.md TESTS.yaml [-o ORG] [--final] [--agent FILE.agent]` | every `UC-nn` tagged; `# messy-data` when S8 applies (C6–C11 with `-o`); each refuse item `# OOS-nn` (C12); customer-facing needs `# security` or `# prompt-injection` (C13) | spec and tests; `-o` needs an org |
+| `handoff SPEC.md FILE.agent [--tests TESTS.yaml] [--results RESULTS.json]` | escalation path vs `**Escalation target:**` / `support-channels-only` (H1–H6); instruction heuristics (H5/H9); `--tests` / `--results` for trace proof (H7–H11) | spec and `.agent` |
+| `perms FILE.agent -o ORG [--spec SPEC.md] [--tests TESTS.yaml]` | Apex/Flow access; optional object/field table (`--spec`, P9–P12); `UserRecordAccess` on test record IDs (`--tests`, P13) | an authenticated org |
 | `active AGENT -o ORG` | which version is `Active`, read from the org. `--version N` to require one. With `--state`, a pass appends to `releases.json` which files shipped as that version, with the commit | an authenticated org |
 | `testrun TESTS.yaml -o ORG` | records a passing agent test run in the state file (`test_run`: time, org API version, bundled platform release, hash of `tests.yaml`). Use `--result-json` from `sf agent test run` or `--pass` after trace evidence. Rules T1–T4 | an authenticated org |
 | `observe SPEC.md -o ORG` | after go-live, compares the `## Success Metric` to live data. Warns on M4 when below target; never blocks release. Uses MessagingSession SOQL when it works, else `--input` JSON with documented counts from observability exports. Rules M1–M5 | an authenticated org and `--state` |
@@ -91,13 +91,13 @@ Read [references/platform-gotchas.md](references/platform-gotchas.md) before wri
 
 ### Phase 5: test
 
-Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). Tag each `## Out of Scope` refuse item with `# OOS-nn` on a test case. Customer-facing agents need at least one case tagged `# security` or `# prompt-injection`. When the spec names a messy-record source, tag at least one case with `# messy-data` and set `recordId` (or `recordIds`) to a real row from that sandbox. Run `coverage` (and `coverage -o` on the declared sandbox plus `perms --tests` on the build org before `--final`). Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in utterances too: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name. When the suite passes, run `testrun` with `--state` so `status` can tell when a later Salesforce release or org API upgrade means re-testing a `SHIPPED` agent.
+Invoke `agentforce-test`. Write `tests.yaml` in Testing Center format: `# UC-nn`, `# OOS-nn` per refuse item, `# security` or `# prompt-injection` for customer-facing agents, and `# messy-data` with real `recordId` values when S8 applies. Run `coverage --agent` (and `coverage -o` + `perms --tests` on the build org before `--final`). Run `handoff --tests` and, after an org suite, `handoff --results`. Preview and Testing Center runs need trace evidence; use live actions when results matter. When the suite passes, run `testrun --state` for later `RETEST` hints on `status`.
 
 ### Phase 6: release
 
-Run `status --require spec,lint,coverage,handoff,perms`, then `spec --final`, `lint --final` and `handoff` again. For each environment in the spec, in order:
+Run `status --require spec,lint,coverage,handoff,perms`, then `spec --final`, `lint --final` and `handoff` with `--tests` again (and `--results` when org output is available). For each environment in the spec, in order:
 
-1. Run `perms --spec` against that org.
+1. Run `perms --spec --tests` against that org.
 2. Show the org, the agent and the version, and get approval as the repo's rules require (always for production).
 3. Before a production activation, note the version that is active now. That is the rollback.
 4. Publish and activate following "Deploy, Publish, and Activate" in `agentforce-generate`.

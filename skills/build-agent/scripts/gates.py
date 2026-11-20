@@ -5,10 +5,10 @@
     gates.py recon [REPO] [--no-orgs]        repo profile as JSON (read-only)
     gates.py spec SPEC.md [--final]          Agent Spec is complete
     gates.py lint FILE.agent [--final]       pitfalls the compiler does not report
-    gates.py coverage SPEC.md TESTS.yaml [-o ORG] [--final]
-                                             every use case has a test; with -o, messy rows exist,
-                                             match the declared criterion, and tests use that org
-    gates.py handoff SPEC.md FILE.agent      escalation matches the Human Handoff promise
+    gates.py coverage SPEC.md TESTS.yaml [-o ORG] [--final] [--agent FILE.agent]
+                                             use cases, OOS and security tags; with -o, messy rows
+    gates.py handoff SPEC.md FILE.agent [--tests TESTS.yaml] [--results RESULTS.json]
+                                             escalation path, trace expectations, org run output
     gates.py perms FILE.agent -o ORG         the agent user can reach the action targets
     gates.py perms FILE.agent -o ORG [--spec SPEC.md] [--tests TESTS.yaml]
                                              optional object/field and record visibility (UserRecordAccess)
@@ -75,9 +75,19 @@ TRANSFER_PROMISE = re.compile(
     r"(?:a\s+)?(?:person|human|agent|queue)|live\s+(?:agent|handoff)|"
     r"hand\s+off\s+to\s+(?:a\s+)?(?:person|queue))\b", re.I)
 TRANSFER_DENIAL = re.compile(
-    r"\b(?:no|not|never|without)\s+(?:promis(?:e|ing)\s+)?(?:a\s+)?transfer|"
+    r"\b(?:no|not|never|without)\s+(?:promis(?:e|ing)\s+)?(?:a\s+)?(?:live\s+)?transfer|"
     r"cannot\s+(?:make|perform)|does\s+not\s+transfer", re.I)
 ESCALATE_IN_AGENT = re.compile(r"@utils\.escalate\b")
+ESCALATION_TARGET = re.compile(
+    r"\*\*\s*Escalation target:\s*\*\*\s*(.+?)(?:\s*$|\*\*)", re.I | re.M)
+INFORMATIONAL_HANDOFF = re.compile(
+    r"(?i)\b(?:without\s+promis(?:e|ing)|say\s+how\s+to\s+reach|"
+    r"no\s+live\s+transfer|support\s+(?:phone|email|channel)|only\s+(?:name|point\s+to))",
+)
+OOS_TAG = re.compile(r"\bOOS-\d{2,}\b")
+SECURITY_TAG = re.compile(r"\b(?:security|prompt-injection)\b", re.I)
+ESCALATE_ACTION_NAME = re.compile(
+    r"(?i)(?:^|_)escalat|handoff|transfer_to|live_transfer")
 SALESFORCE_FIELD = re.compile(r"`([A-Za-z_][\w]*(?:__c)?)\.([A-Za-z_][\w]*)`")
 SALESFORCE_OBJECT = re.compile(r"`([A-Za-z_][\w]*(?:__c)?)`")
 TOP_BLOCK = re.compile(r"^([A-Za-z_]\w*)(?:\s+[\w.]+)?\s*:")
@@ -635,8 +645,228 @@ def messy_data_tests(tests: str) -> list[dict]:
     return cases
 
 
+def out_of_scope_items(spec: str) -> list[tuple[str, str]]:
+    """Numbered refuse items (`OOS-01`, …) from `## Out of Scope` prose or bullets."""
+    _, body = sections(spec).get("out of scope", (0, []))
+    if not body:
+        return []
+    items: list[str] = []
+    for line in body:
+        text = line.strip()
+        if not text or text.startswith("<!--"):
+            continue
+        bullet = re.match(r"^(?:[-*]|\d+[.)])\s+(.+)", text)
+        if bullet:
+            items.append(bullet.group(1).rstrip(".").strip())
+            continue
+    if not items:
+        prose = " ".join(l.strip() for l in body if l.strip() and not l.strip().startswith("<!--"))
+        first = re.split(r"\.\s+(?=[A-Z(])", prose, maxsplit=1)[0]
+        for part in re.split(r",\s*(?:and\s+)?|;\s*", first):
+            part = part.strip().rstrip(".")
+            if part and not part.lower().startswith("the agent"):
+                items.append(part)
+    return [(f"OOS-{i:02d}", text) for i, text in enumerate(items, 1)]
+
+
+def tagged_oos_ids(tests: str) -> set[str]:
+    """`# OOS-nn` on comment lines above a test case, same rules as `tagged_ids`."""
+    tagged, pending = set(), set()
+    for line in tests.splitlines():
+        text = line.strip()
+        if text.startswith("#") and "utterance" not in text:
+            pending |= set(OOS_TAG.findall(text))
+        elif re.match(r"-\s*utterance\s*:", text):
+            tagged |= pending
+            pending = set()
+        elif text:
+            pending = set()
+    return tagged
+
+
+def security_tagged_tests(tests: str) -> bool:
+    pending = False
+    for line in tests.splitlines():
+        text = line.strip()
+        if text.startswith("#") and "utterance" not in text:
+            pending = bool(SECURITY_TAG.search(text))
+        elif re.match(r"-\s*utterance\s*:", text):
+            if pending:
+                return True
+            pending = False
+        elif text:
+            pending = False
+    return False
+
+
+def customer_facing_agent(spec: str, agent: str | None) -> bool:
+    if agent:
+        if re.search(r"AgentforceServiceAgent|ServiceAgent", agent, re.I):
+            return True
+    _, cfg = sections(spec).get("agent configuration", (0, []))
+    return any("service" in l.lower() and "agent" in l.lower() for l in cfg)
+
+
+def test_cases_with_meta(tests: str) -> list[dict]:
+    """Each live test case: UC tags, optional OOS tags, and `expectedActions` if present."""
+    cases: list[dict] = []
+    pending_uc, pending_oos = set(), set()
+    active: dict | None = None
+    for line in tests.splitlines():
+        text = line.strip()
+        if text.startswith("#") and "utterance" not in text:
+            if active is not None:
+                active = None
+            pending_uc |= set(UC.findall(text))
+            pending_oos |= set(OOS_TAG.findall(text))
+        elif m := re.match(r"-\s*utterance\s*:\s*\"(.+)\"", text):
+            active = {"ucs": set(pending_uc) | set(UC.findall(line)),
+                      "oos": set(pending_oos), "expected_actions": [],
+                      "utterance": m.group(1)}
+            cases.append(active)
+            pending_uc, pending_oos = set(), set()
+        elif re.match(r"-\s*utterance\s*:", text):
+            active = {"ucs": set(pending_uc) | set(UC.findall(line)),
+                      "oos": set(pending_oos), "expected_actions": [], "utterance": ""}
+            cases.append(active)
+            pending_uc = pending_oos = set()
+        elif active is not None and re.match(r"expectedActions\s*:", text, re.I):
+            active["collecting_actions"] = True
+        elif active is not None and active.get("collecting_actions"):
+            item = re.match(r"-\s*(\S+)", text)
+            if item:
+                active["expected_actions"].append(item.group(1))
+            elif text and not text.startswith("#"):
+                active["collecting_actions"] = False
+        elif active is not None and text and not text.startswith("#"):
+            if not text.startswith("-") and not re.match(r"[\w]+:", text):
+                active = None
+    return cases
+
+
+def escalation_targets_in_agent(agent: str) -> set[str]:
+    refs = set()
+    for match in ESCALATE_IN_AGENT.findall(agent):
+        refs.add(match)
+    for flow in re.findall(r"flow://(\w+)", agent):
+        if ESCALATE_ACTION_NAME.search(flow) or re.search(
+                r"(?i)escalat|handoff|transfer", agent[agent.find(f"flow://{flow}") - 80:
+                                                   agent.find(f"flow://{flow}") + 80]):
+            refs.add(f"flow://{flow}")
+    for name in re.findall(r"^\s+(\w+)\s*:\s*@utils\.escalate", agent, re.M):
+        refs.add(name)
+    return refs
+
+
+def escalation_target_from_spec(handoff: str) -> str | None:
+    match = ESCALATION_TARGET.search(handoff)
+    if not match:
+        return None
+    raw = match.group(1).strip().strip("`").strip()
+    return raw or None
+
+
+def escalation_action_names(agent: str) -> set[str]:
+    names = {m.group(1) for m in re.finditer(r"^\s+(\w+)\s*:\s*@utils\.escalate", agent, re.M)}
+    names |= {"escalate", "escalate_to_human", "utils_escalate"}
+    return names
+
+
+def normalize_escalation_ref(text: str) -> str:
+    return re.sub(r"\s+", "", text.lower().strip("`"))
+
+
+def agent_target_matches_declared(agent: str, declared: str) -> bool:
+    declared_n = normalize_escalation_ref(declared)
+    if "@utils.escalate" in declared_n and ESCALATE_IN_AGENT.search(agent):
+        return True
+    flow = re.search(r"flow://(\w+)", declared, re.I)
+    if flow and f"flow://{flow.group(1)}" in agent:
+        return True
+    apex = re.search(r"apex://([\w$]+)", declared, re.I)
+    if apex and f"apex://{apex.group(1)}" in agent:
+        return True
+    bare = declared.strip("`").strip()
+    if re.fullmatch(r"[\w_]+", bare):
+        return bool(re.search(rf"^\s+{re.escape(bare)}\s*:", agent, re.M))
+    return declared_n in {normalize_escalation_ref(r) for r in escalation_targets_in_agent(agent)}
+
+
+def agent_instruction_text(agent: str) -> str:
+    lines = agent.splitlines()
+    chunks: list[str] = []
+    i = 0
+    while i < len(lines):
+        if re.search(r"\binstructions\s*:", lines[i]) and "|" in lines[i]:
+            if lines[i].rstrip().endswith("|"):
+                indent = len(lines[i]) - len(lines[i].lstrip()) + 4
+                i += 1
+                while i < len(lines) and (not lines[i].strip()
+                                          or len(lines[i]) - len(lines[i].lstrip()) >= indent):
+                    chunks.append(lines[i])
+                    i += 1
+                continue
+        if re.match(r"\s+instructions\s*:\s*->", lines[i]):
+            i += 1
+            if i < len(lines) and "|" in lines[i]:
+                match = LITERAL_BLOCK.match(lines[i])
+                if match:
+                    indent = len(match.group(1))
+                    i += 1
+                    while i < len(lines) and (not lines[i].strip()
+                                              or len(lines[i]) - len(lines[i].lstrip()) > indent):
+                        chunks.append(lines[i])
+                        i += 1
+                    continue
+        if re.match(r"\s+instructions\s*:\s*\|", lines[i]):
+            match = LITERAL_BLOCK.match(lines[i])
+            if match:
+                indent = len(match.group(1))
+                i += 1
+                while i < len(lines) and (not lines[i].strip()
+                                        or len(lines[i]) - len(lines[i].lstrip()) > indent):
+                    chunks.append(lines[i])
+                    i += 1
+                continue
+        i += 1
+    return "\n".join(chunks)
+
+
+def test_expects_escalation(case: dict, agent: str) -> bool:
+    actions = {a.lower() for a in case.get("expected_actions", [])}
+    names = {n.lower() for n in escalation_action_names(agent)}
+    if actions & names:
+        return True
+    return any(ESCALATE_ACTION_NAME.search(a) for a in actions)
+
+
+def parse_agent_test_results(path: str) -> list[dict]:
+    """Normalise a few JSON shapes from `sf agent test` / Testing Center exports."""
+    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    rows: list[dict] = []
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        for key in ("testCases", "testCaseResults", "results", "cases"):
+            if isinstance(data.get(key), list):
+                rows = data[key]
+                break
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        actions = row.get("actionsExecuted") or row.get("actionsRan") or row.get(
+            "expectedActions") or row.get("actualActions") or []
+        if isinstance(actions, str):
+            actions = [actions]
+        out.append({"actions": actions,
+                    "utterance": row.get("utterance") or row.get("input") or "",
+                    "passed": row.get("passed", row.get("status") == "passed")})
+    return out
+
+
 def gate_coverage(spec_path: str, tests_path: str, org: str | None = None,
-                  final: bool = False) -> Gate:
+                  final: bool = False, agent_path: str | None = None) -> Gate:
     gate, tests = Gate("coverage"), text_of(tests_path)
     wanted, tested = set(use_case_ids(text_of(spec_path))), tagged_ids(tests)
     if not wanted:
@@ -685,6 +915,26 @@ def gate_coverage(spec_path: str, tests_path: str, org: str | None = None,
                     for record_id in case.get("recordIds", []):
                         for reason in check_messy_record(org, record_id, criteria, sobject):
                             gate.error("C11", f"`{record_id}`: {reason}", tests_path)
+    refuse = out_of_scope_items(spec_text)
+    if refuse:
+        covered = tagged_oos_ids(tests)
+        for oos_id, label in refuse:
+            if oos_id not in covered:
+                short = label if len(label) <= 60 else label[:57] + "..."
+                gate.error("C12", f"refuse item `{oos_id}` ({short}) has no test. "
+                                 f"Tag `# {oos_id}` above a `- utterance:`",
+                           tests_path)
+        for case in test_cases_with_meta(tests):
+            for oos_id in case.get("oos", ()):
+                if oos_id not in {oid for oid, _ in refuse}:
+                    gate.warn("C14", f"`{oos_id}` is tagged on a test but is not in "
+                                     "`## Out of Scope`", tests_path)
+    agent_text = text_of(agent_path) if agent_path else None
+    if customer_facing_agent(spec_text, agent_text):
+        if not security_tagged_tests(tests):
+            gate.error("C13", "customer-facing agent needs at least one live test tagged "
+                             "`# security` or `# prompt-injection` above `- utterance:`",
+                       tests_path)
     return gate
 
 
@@ -700,6 +950,28 @@ def handoff_use_case_lines(spec: str) -> list[str]:
             and re.search(r"\|\s*handoff\s*\|", line, re.I)]
 
 
+def handoff_must_column(row: str) -> str:
+    parts = [p.strip() for p in row.split("|")]
+    return parts[4] if len(parts) >= 5 else row
+
+
+def handoff_uc_requires_live(row: str) -> bool:
+    if not re.search(r"\|\s*handoff\s*\|", row, re.I):
+        return False
+    must = handoff_must_column(row)
+    if INFORMATIONAL_HANDOFF.search(must) or TRANSFER_DENIAL.search(must):
+        return False
+    return promises_live_transfer(must) or promises_live_transfer(row)
+
+
+def live_handoff_use_case_lines(spec: str) -> list[str]:
+    return [row for row in handoff_use_case_lines(spec) if handoff_uc_requires_live(row)]
+
+
+def handoff_uc_ids(spec: str) -> list[str]:
+    return [UC.search(row).group(0) for row in live_handoff_use_case_lines(spec) if UC.search(row)]
+
+
 def promises_live_transfer(text: str) -> bool:
     flat = re.sub(r"\s+", " ", HANDOFF_MODE.sub("", text))
     if TRANSFER_DENIAL.search(flat):
@@ -711,35 +983,128 @@ def agent_can_escalate(agent: str) -> bool:
     return bool(ESCALATE_IN_AGENT.search(agent))
 
 
-def gate_handoff(spec_path: str, agent_path: str) -> Gate:
+def agent_has_declared_escalation(agent: str, handoff: str) -> bool:
+    target = escalation_target_from_spec(handoff)
+    if target:
+        return agent_target_matches_declared(agent, target)
+    return bool(ESCALATE_IN_AGENT.search(agent))
+
+
+def gate_handoff(spec_path: str, agent_path: str,
+                 tests_path: str | None = None,
+                 results_path: str | None = None) -> Gate:
     gate = Gate("handoff")
     spec, agent = text_of(spec_path), text_of(agent_path)
     handoff = handoff_section_body(spec)
     offline = bool(HANDOFF_MODE.search(handoff))
-    escalates = agent_can_escalate(agent)
-    handoff_rows = handoff_use_case_lines(spec)
-    spec_promises = promises_live_transfer(handoff) or any(
-        promises_live_transfer(row) for row in handoff_rows)
+    declared = escalation_target_from_spec(handoff)
+    wired = agent_has_declared_escalation(agent, handoff)
+    live_rows = live_handoff_use_case_lines(spec)
+    all_handoff_rows = handoff_use_case_lines(spec)
+    spec_promises = promises_live_transfer(handoff) or bool(live_rows)
+    prompt = agent_instruction_text(agent)
+    prompt_promises = bool(prompt and promises_live_transfer(prompt))
+
+    if declared and not offline and not agent_target_matches_declared(agent, declared):
+        gate.error("H6", f"spec declares `**Escalation target:** {declared}` but the "
+                         f"`.agent` has no matching wire-up",
+                   agent_path)
+
     if offline:
-        if escalates:
+        if ESCALATE_IN_AGENT.search(agent):
             gate.error("H3", "spec declares `**Handoff mode:** support-channels-only` "
                              "but the `.agent` still references `@utils.escalate`",
                        agent_path)
-        if spec_promises:
+        if declared and declared != "@utils.escalate" and agent_target_matches_declared(
+                agent, declared):
+            gate.error("H3", "support-channels-only must not wire a live escalation "
+                             "target in the `.agent`",
+                       agent_path)
+        scope_promise = promises_live_transfer(handoff) or any(
+            handoff_uc_requires_live(row) for row in all_handoff_rows)
+        if scope_promise:
             gate.error("H4", "support-channels-only handoff must not promise a live "
                              "transfer in `## Human Handoff` or a `handoff` use case",
                        spec_path)
+        if prompt and promises_live_transfer(prompt):
+            gate.error("H5", "support-channels-only but `.agent` instructions contain "
+                             "live-transfer phrasing (heuristic keyword scan)",
+                       agent_path)
+            gate.note("H5 uses a keyword heuristic on reasoning/system text, not a "
+                      "semantic read of the prompt")
+        elif prompt and TRANSFER_PROMISE.search(prompt):
+            gate.warn("H5", "`.agent` instructions may promise a transfer; review "
+                            "wording (heuristic)", agent_path)
         gate.note("support-channels-only: no live escalation path is required")
         return gate
-    needs_path = spec_promises or bool(handoff_rows)
-    if needs_path and not escalates:
-        gate.error("H1", "the spec promises or tests a live handoff but the `.agent` "
-                         "has no `@utils.escalate`. Declare `**Handoff mode:** "
-                         "support-channels-only` in `## Human Handoff` if transfer is "
-                         "out of scope", agent_path)
-    if spec_promises and not escalates:
-        gate.error("H2", "`## Human Handoff` or a `handoff` use case promises a transfer "
-                         "the agent cannot perform", spec_path)
+
+    needs_path = spec_promises or bool(live_rows) or prompt_promises
+    if needs_path and not wired:
+        gate.error("H1", "the spec or `.agent` instructions promise or test a live "
+                         "handoff but the `.agent` has no escalation path. Wire "
+                         f"`{declared or '@utils.escalate'}` or declare "
+                         "`**Handoff mode:** support-channels-only`", agent_path)
+    if spec_promises and not wired:
+        gate.error("H2", "`## Human Handoff` or a live `handoff` use case promises a "
+                         "transfer the agent cannot perform", spec_path)
+    if prompt_promises and not wired:
+        gate.error("H9", "`.agent` instructions promise a live transfer (reasoning or "
+                         "system text) but no escalation target is wired",
+                   agent_path)
+
+    if tests_path:
+        tests = text_of(tests_path)
+        live_ucs = set(handoff_uc_ids(spec))
+        if live_ucs:
+            cases = test_cases_with_meta(tests)
+            covered = {uc for case in cases for uc in case["ucs"]}
+            for uc in sorted(live_ucs - covered):
+                gate.error("H7", f"live `handoff` use case `{uc}` has no test tagged "
+                                 "on `- utterance:`. The suite must expect escalation "
+                                 "in the trace", tests_path)
+            reported: set[str] = set()
+            for case in cases:
+                missing = sorted(case["ucs"] & live_ucs)
+                if not missing:
+                    continue
+                if test_expects_escalation(case, agent):
+                    continue
+                for uc in missing:
+                    if uc in reported:
+                        continue
+                    reported.add(uc)
+                    gate.error("H8", f"test for `{uc}` does not list an escalation "
+                                     "action in `expectedActions` (trace must show "
+                                     "the handoff ran)", tests_path)
+
+    if results_path:
+        try:
+            rows = parse_agent_test_results(results_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            gate.error("H10", f"could not read test results: {exc}", results_path)
+            rows = []
+        names = {n.lower() for n in escalation_action_names(agent)}
+        live_uc_set = set(handoff_uc_ids(spec))
+        handoff_utterances = [
+            case["utterance"].lower() for case in (
+                test_cases_with_meta(text_of(tests_path)) if tests_path else [])
+            if case.get("utterance") and case["ucs"] & live_uc_set]
+        for row in rows:
+            if row.get("passed") is False:
+                continue
+            utter = (row.get("utterance") or "").lower()
+            if handoff_utterances and not any(u in utter or utter in u for u in handoff_utterances):
+                continue
+            ran = {str(a).lower() for a in row.get("actions", [])}
+            escalated = bool(ran & names) or any(
+                ESCALATE_ACTION_NAME.search(str(a)) for a in row.get("actions", []))
+            if not escalated:
+                gate.error("H10", "org test result passed but the trace shows no "
+                                 "escalation action (heuristic name match)",
+                           results_path)
+            elif not ran:
+                gate.warn("H11", "result row has no action list; could not verify "
+                                 "escalation on the trace", results_path)
     return gate
 
 
@@ -1189,7 +1554,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("coverage"); p.add_argument("spec"); p.add_argument("tests")
     p.add_argument("-o", "--org", help="org where tests run: messy rows must exist there")
     p.add_argument("--final", action="store_true")
+    p.add_argument("--agent", help="`.agent` file; needed for customer-facing security rule C13")
     p = sub.add_parser("handoff"); p.add_argument("spec"); p.add_argument("agent")
+    p.add_argument("--tests", help="tests.yaml; require escalation in expectedActions for live handoff")
+    p.add_argument("--results", help="JSON org test results; verify escalation ran on the trace")
     p = sub.add_parser("perms"); p.add_argument("agent"); p.add_argument("-o", "--org", required=True)
     p.add_argument("--spec", help="spec with optional ## Salesforce Data Access for object/field checks")
     p.add_argument("--tests", help="tests.yaml: UserRecordAccess on recordId / recordIds rows")
@@ -1220,9 +1588,13 @@ def main(argv: list[str] | None = None) -> int:
         if a.gate == "lint":
             return gate_lint(a.agent, a.final).finish(a.state, [a.agent])
         if a.gate == "coverage":
-            return gate_coverage(a.spec, a.tests, a.org, a.final).finish(a.state, [a.spec, a.tests])
+            inputs = [a.spec, a.tests] + ([a.agent] if a.agent else [])
+            return gate_coverage(a.spec, a.tests, a.org, a.final, a.agent).finish(a.state, inputs)
         if a.gate == "handoff":
-            return gate_handoff(a.spec, a.agent).finish(a.state, [a.spec, a.agent])
+            inputs = [a.spec, a.agent] + ([a.tests] if a.tests else [])
+            if a.results:
+                inputs.append(a.results)
+            return gate_handoff(a.spec, a.agent, a.tests, a.results).finish(a.state, inputs)
         if a.gate == "perms":
             inputs = [a.agent] + ([a.spec] if a.spec else []) + ([a.tests] if a.tests else [])
             return gate_perms(a.agent, a.org, a.spec, a.tests).finish(a.state, inputs)
