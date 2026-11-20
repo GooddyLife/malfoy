@@ -15,14 +15,16 @@ ROWS = [  # label, the official skills on their own, the same skills conducted b
     ("Phase is done", "When the model judges it so", "When a script exits 0"),
     ("The spec", "Purpose, behaviour, subagents, actions", "+ metric, scope, handoff, data, envs"),
     ("Tests vs. spec", "\"Coverage maps against it\", in prose", "coverage names the untested use case"),
-    ("The agent user", "A setup guide, with queries to run", "perms checks its access, in the org"),
+    ("Messy real records", "Not in the template", "spec S8 + coverage C6 on sandbox rows"),
+    ("Live handoff", "Instructions only", "handoff: escalate or support-channels-only"),
+    ("The agent user", "A setup guide, with queries to run", "perms + optional object/field rows"),
     ("Compiler gaps", "Reference pages to read", "lint: seven rules, file and line"),
     ("\"It's active\"", "A query in the docs", "active: pass or fail"),
     ("Edited after a pass", "Nothing records it", "STALE"),
     ("Spec per version", "Saved, not tied to what shipped", "active logs version, hashes, commit"),
     ("Your repo's rules", "Not looked for", "Read first. They override his"),
 ]
-GATES = ("coverage", "perms", "lint", "active", "STALE")
+GATES = ("coverage", "handoff", "perms", "lint", "active", "STALE", "S8")
 CLOSING = "The official skills do the building. Malfoy makes them prove it."
 
 LOOP, FIRST, STEP, ANSWER = 29.0, 1.2, 2.0, 0.8   # seconds
@@ -65,7 +67,7 @@ end = FIRST + len(ROWS) * STEP + 0.6
 css += [appear("z", end), f".z{{animation:z {LOOP:g}s linear infinite}}"]
 foot = TOP + ROW * len(ROWS)
 
-svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-label="Eleven differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below the image.">
+svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-label="Thirteen differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below the image.">
 <style>
 text{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}}
 .anim{{opacity:0}}

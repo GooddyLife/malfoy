@@ -2,12 +2,25 @@
 
 ## Unreleased
 
-Lessons from [the recorded run](examples/recorded-run):
+Nothing yet.
 
-- The example's `tests.yaml` named actions by their reasoning alias and the topic by the `start_agent` block. The Testing Center reports the action definition name and `topic_selector`; the example now uses both.
-- Phase 5: judge anything that depends on an action's result with live actions, because simulated actions invent the result.
-- Phase 0: `recon --no-orgs` when the session is recorded or shared.
-- `platform-gotchas.md`: simulated actions, Testing Center names, published agents that the Metadata API cannot delete, intermittent CLI failures, Windows long paths, and the first `perms` run of a new agent user.
+## 0.3.0 (2026-11-20)
+
+Acknowledgements: thank **Arjun Gupta** and **Mohith Kumar** for feedback on LinkedIn that drove these changes.
+
+### Added
+
+- **`handoff` gate** (H1–H4). Fails when the spec promises a live transfer but the `.agent` has no `@utils.escalate`, when `**Handoff mode:** support-channels-only` still promises a transfer, or when that mode is declared while `@utils.escalate` remains wired.
+- **Messy real records in the contract.** `spec` rule S8 requires `**Messy records:**` or `**Realistic test data:**` under `## Environments` or `## Data & Privacy`. `coverage` rule C6 requires at least one test tagged `# messy-data` when that declaration exists; C7 warns when those tests omit `recordId` / `recordIds`.
+- **`## Salesforce Data Access`** in the spec (optional table). `perms --spec` checks `ObjectPermissions` and `FieldPermissions` for declared reads and edits (P9–P12). Without the section, behaviour matches 0.2.0.
+- Unit tests for every new rule, with org answers faked as before.
+- README FAQ: which spec and tests shipped as which org version (`releases.json` + `DRIFT`).
+- Comparison table rows for messy records and live handoff.
+
+### Changed
+
+- Playbook, discovery reference and `examples/order-status` updated so the example passes the new gates.
+- `platform-gotchas.md`: messy-record testing, handoff without an action, and how `perms --spec` works.
 
 ## 0.2.0 (2026-11-16)
 

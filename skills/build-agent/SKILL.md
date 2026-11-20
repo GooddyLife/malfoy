@@ -4,7 +4,7 @@ description: Guides building a Salesforce Agentforce agent end to end, from prod
 license: MIT
 metadata:
   author: GooddyLife
-  version: 0.2.0
+  version: 0.3.0
 ---
 
 # Build an Agentforce agent, end to end
@@ -36,8 +36,9 @@ If `${CLAUDE_SKILL_DIR}` shows up unresolved, the script is at `scripts/gates.py
 | `recon [REPO]` | prints the repo profile as JSON: packages, existing agents, rule files to read, CI, orgs | a DX project |
 | `spec SPEC.md` | every section present and filled, no template placeholder left, use cases have IDs, at least one guardrail. `--final`: every action is `EXISTS` | the spec |
 | `lint FILE.agent` | pitfalls the compiler does not report (codes L1 to L7). `--final`: unfinished markers become errors | the `.agent` |
-| `coverage SPEC.md TESTS.yaml` | every `UC-nn` in the spec is tagged on a test case | spec and tests |
-| `perms FILE.agent -o ORG` | the agent user exists, is active, can reach every Apex target, every Flow target exists and is active | an authenticated org |
+| `coverage SPEC.md TESTS.yaml` | every `UC-nn` in the spec is tagged on a test case; when the spec names a messy-record source, at least one test is tagged `# messy-data` | spec and tests |
+| `handoff SPEC.md FILE.agent` | live handoff promises match `@utils.escalate`, or the spec declares `**Handoff mode:** support-channels-only` with no transfer promise | spec and `.agent` |
+| `perms FILE.agent -o ORG` | the agent user exists, is active, can reach every Apex target, every Flow target exists and is active. With `--spec`, checks `## Salesforce Data Access` object and field reads/writes | an authenticated org |
 | `active AGENT -o ORG` | which version is `Active`, read from the org. `--version N` to require one. With `--state`, a pass appends to `releases.json` which files shipped as that version, with the commit | an authenticated org |
 | `status STATE.json` | what passed, failed, never ran, or went `STALE` because its input changed. `--require a,b,c`. Also the last release per org: `SHIPPED`, or `DRIFT` with the files changed since | the state file |
 
@@ -51,9 +52,9 @@ Exit code 0 is pass, 1 is fail, 2 means the gate could not run (say so; it is no
 | 1 | Discovery: the spec | `agentforce-generate` (spec template) | `spec`, then the user approves the spec |
 | 2 | Architecture | `agentforce-generate` | `spec` again |
 | 3 | Persona | `agentforce-persona-generate` | score at or above the agreed minimum |
-| 4 | Build | `agentforce-generate` | local compile clean, `lint`, `perms` |
+| 4 | Build | `agentforce-generate` | local compile clean, `lint`, `handoff`, `perms` |
 | 5 | Test | `agentforce-test` | `coverage`, every test passing on trace evidence |
-| 6 | Release | `agentforce-generate` | `status`, `spec --final`, `lint --final`, then `perms` and `active` per org |
+| 6 | Release | `agentforce-generate` | `status`, `spec --final`, `lint --final`, `handoff`, then `perms` and `active` per org |
 | 7 | Observe | `agentforce-observe`, `agentforce-d360-analyze` | optional |
 
 Keep every artifact of one agent in `.malfoy/<AgentApiName>/`: `spec.md`, `tests.yaml`, `state.json`, `releases.json`. Unless the repo's rules say otherwise, suggest committing the folder with the agent: the commits in `releases.json` then show what changed in the spec between any two versions.
@@ -84,17 +85,17 @@ Invoke `agentforce-persona-generate`. Agree a minimum score with the user before
 
 ### Phase 4: build
 
-Read [references/platform-gotchas.md](references/platform-gotchas.md) before writing instructions. Invoke `agentforce-generate` ("Create an Agent"). Compile locally as that skill requires, then run `lint`. Deploy dependencies to the build org only as the repo's rules allow, then run `perms` against that org. A `perms` failure is a blocker: permission problems in agent actions are silent at runtime.
+Read [references/platform-gotchas.md](references/platform-gotchas.md) before writing instructions. Invoke `agentforce-generate` ("Create an Agent"). Compile locally as that skill requires, then run `lint` and `handoff`. Deploy dependencies to the build org only as the repo's rules allow, then run `perms` against that org (pass `--spec` once `## Salesforce Data Access` is filled in). A `perms` or `handoff` failure is a blocker: permission problems and broken handoff promises are silent at runtime.
 
 ### Phase 5: test
 
-Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). Run `coverage`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in tests: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name.
+Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). When the spec names a messy-record source, tag at least one case with `# messy-data` and set `recordId` (or `recordIds`) to a real row from that sandbox. Run `coverage`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in utterances too: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name.
 
 ### Phase 6: release
 
-Run `status --require spec,lint,coverage,perms`, then `spec --final` and `lint --final`. For each environment in the spec, in order:
+Run `status --require spec,lint,coverage,handoff,perms`, then `spec --final`, `lint --final` and `handoff` again. For each environment in the spec, in order:
 
-1. Run `perms` against that org.
+1. Run `perms --spec` against that org.
 2. Show the org, the agent and the version, and get approval as the repo's rules require (always for production).
 3. Before a production activation, note the version that is active now. That is the rollback.
 4. Publish and activate following "Deploy, Publish, and Activate" in `agentforce-generate`.

@@ -5,6 +5,7 @@ says so. The org gates (perms, active) get faked SOQL answers: no org is needed.
 """
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -40,7 +41,7 @@ class GatesTest(unittest.TestCase):
         spec, agent, tests = (self.file("spec.md", SPEC), self.file("a.agent", AGENT),
                               self.file("tests.yaml", TESTS))
         for gate in (gates.gate_spec(spec), gates.gate_lint(agent, final=True),
-                     gates.gate_coverage(spec, tests)):
+                     gates.gate_handoff(spec, agent), gates.gate_coverage(spec, tests)):
             self.assertEqual(gate.errors + gate.warns, [], gate.name)
 
     def test_spec_missing_section_placeholder_and_guardrail(self):
@@ -79,6 +80,48 @@ class GatesTest(unittest.TestCase):
         spec = self.file("spec.md", SPEC)
         gate = gates.gate_coverage(spec, self.file("tests.yaml", TESTS.replace("# UC-04", "#")))
         self.assertEqual([msg.split("`")[1] for _, _, msg in gate.errors], ["UC-04"])
+
+    def test_spec_requires_messy_record_source(self):
+        stripped = SPEC.replace("**Messy records:**", "**Neat records:**", 1)
+        self.assertIn("S8", self.codes(gates.gate_spec(self.file("spec.md", stripped))))
+
+    def test_handoff_requires_escalate_or_offline_mode(self):
+        spec, agent = self.file("spec.md", SPEC), self.file("a.agent", AGENT)
+        self.assertEqual(gates.gate_handoff(spec, agent).errors, [])
+        no_esc = AGENT.replace("escalate_to_human: @utils.escalate", "# removed")
+        self.assertEqual(self.codes(gates.gate_handoff(spec, self.file("b.agent", no_esc))),
+                         {"H1", "H2"})
+        offline = SPEC.replace(
+            "## Human Handoff",
+            "## Human Handoff\n\n**Handoff mode:** support-channels-only", 1)
+        offline = re.sub(r"\| UC-04 \| handoff \|.*\n", "", offline)
+        offline = offline.replace(
+            "transfer right away, without trying to solve it first",
+            "say how to reach support, without promising a transfer", 1)
+        offline = offline.replace(
+            "On request, at any point. Also after two lookups in a row that find nothing. "
+            "The chat goes\n to the Customer Care queue with the conversation attached.",
+            "On request, point to the support phone line. No live transfer.", 1)
+        no_esc_path = self.file("d.agent", no_esc)
+        self.assertEqual(
+            self.codes(gates.gate_handoff(self.file("s.md", offline), no_esc_path)), set())
+        bad_agent = self.file("c.agent", AGENT)
+        self.assertIn("H3", self.codes(gates.gate_handoff(
+            self.file("s2.md", offline), bad_agent)))
+        promise_spec = re.sub(
+            r"## Human Handoff\n.*?(?=\n## )",
+            ("## Human Handoff\n\n**Handoff mode:** support-channels-only\n\n"
+             "Transfers to the Customer Care queue on request.\n\n"),
+            SPEC, count=1, flags=re.S)
+        no_esc_only = self.file("e.agent", no_esc)
+        self.assertIn("H4", self.codes(gates.gate_handoff(
+            self.file("s3.md", promise_spec), no_esc_only)))
+
+    def test_coverage_requires_messy_data_test(self):
+        spec, tests = self.file("spec.md", SPEC), self.file("tests.yaml", TESTS)
+        self.assertEqual(gates.gate_coverage(spec, tests).errors, [])
+        no_messy = TESTS.replace("# messy-data\n", "")
+        self.assertIn("C6", self.codes(gates.gate_coverage(spec, self.file("t.yaml", no_messy))))
 
     def test_coverage_ignores_tags_not_on_a_live_test_case(self):
         spec, untagged = self.file("spec.md", SPEC), TESTS.replace("# UC-04", "#")
@@ -184,6 +227,29 @@ class OrgGatesTest(unittest.TestCase):
             ApexClass=[{"Id": "01p000000000001AAA", "Name": "OrderService"}],
             SetupEntityAccess=[{"SetupEntityId": "01p000000000001AAA"}],
             FlowDefinitionView=[FLOW_OK]), set())
+
+    def test_perms_checks_declared_object_and_field_access(self):
+        spec = Path(self.dir.name) / "spec.md"
+        spec.write_text(SPEC, encoding="utf-8")
+        gates.soql = FakeOrg(
+            User=[AGENT_USER], PermissionSetAssignment=[ASSIGNED],
+            ApexClass=[{"Id": "01p000000000001AAA", "Name": "OrderService"}],
+            SetupEntityAccess=[{"SetupEntityId": "01p000000000001AAA"}],
+            FlowDefinitionView=[FLOW_OK],
+            ObjectPermissions=[{"SobjectType": "Order__c"}],
+            FieldPermissions=[{"Field": "Order__c.Status__c"}])
+        gate = gates.gate_perms(self.agent, "fake", str(spec))
+        self.assertEqual({c for c, _, _ in gate.errors}, {"P11"})
+        gates.soql = FakeOrg(
+            User=[AGENT_USER], PermissionSetAssignment=[ASSIGNED],
+            ApexClass=[{"Id": "01p000000000001AAA", "Name": "OrderService"}],
+            SetupEntityAccess=[{"SetupEntityId": "01p000000000001AAA"}],
+            FlowDefinitionView=[FLOW_OK],
+            ObjectPermissions=[{"SobjectType": "Order__c"}],
+            FieldPermissions=[{"Field": f} for f in (
+                "Order__c.Status__c", "Order__c.Estimated_Delivery__c",
+                "Order__c.Customer_Email__c")])
+        self.assertEqual(gates.gate_perms(self.agent, "fake", str(spec)).errors, [])
 
     def test_perms_failures(self):
         self.assertEqual(self.perms(), {"P1"})

@@ -6,7 +6,9 @@
     gates.py spec SPEC.md [--final]          Agent Spec is complete
     gates.py lint FILE.agent [--final]       pitfalls the compiler does not report
     gates.py coverage SPEC.md TESTS.yaml     every use case has a test
+    gates.py handoff SPEC.md FILE.agent      escalation matches the Human Handoff promise
     gates.py perms FILE.agent -o ORG         the agent user can reach the action targets
+    gates.py perms FILE.agent -o ORG --spec SPEC.md   optional object/field access from the spec
     gates.py active AGENT -o ORG [--version N]   which version is active, from the org;
                                              with --state, a pass is logged in releases.json
     gates.py status STATE.json [--require a,b]   what passed, what failed, what went stale
@@ -49,6 +51,19 @@ PLACEHOLDERS = [
 ]
 UNFINISHED = re.compile(r"\b(TODO|FIXME|NEEDS STUB|NEEDS CREATION|PLACEHOLDER)\b")
 UC = re.compile(r"\bUC-\d+\b")
+HANDOFF_MODE = re.compile(r"\*\*handoff\s+mode:\*\*\s*support-channels-only", re.I)
+MESSY_SOURCE = re.compile(
+    r"\*\*(?:messy\s+records|realistic\s+test\s+data):\*\*", re.I)
+TRANSFER_PROMISE = re.compile(
+    r"\b(?:transfer(?:s|ring)?(?:\s+(?:to|the|right\s+away))?|(?:goes|route[ds]?|connect(?:s|ed)?)\s+to\s+"
+    r"(?:a\s+)?(?:person|human|agent|queue)|live\s+(?:agent|handoff)|"
+    r"hand\s+off\s+to\s+(?:a\s+)?(?:person|queue))\b", re.I)
+TRANSFER_DENIAL = re.compile(
+    r"\b(?:no|not|never|without)\s+(?:promis(?:e|ing)\s+)?(?:a\s+)?transfer|"
+    r"cannot\s+(?:make|perform)|does\s+not\s+transfer", re.I)
+ESCALATE_IN_AGENT = re.compile(r"@utils\.escalate\b")
+SALESFORCE_FIELD = re.compile(r"`([A-Za-z_][\w]*(?:__c)?)\.([A-Za-z_][\w]*)`")
+SALESFORCE_OBJECT = re.compile(r"`([A-Za-z_][\w]*(?:__c)?)`")
 TOP_BLOCK = re.compile(r"^([A-Za-z_]\w*)(?:\s+[\w.]+)?\s*:")
 LITERAL_BLOCK = re.compile(r"^(\s*)[\w.\-]+\s*:\s*\|[+-]?\d*\s*$")
 SF_TIMEOUT = int(os.environ.get("MALFOY_SF_TIMEOUT", "120"))  # seconds per sf call
@@ -251,6 +266,12 @@ def gate_spec(path: str, final: bool = False) -> Gate:
     elif pending:
         gate.note(f"{len(pending)} of {len(statuses)} action(s) still to build "
                   "(fine now, an error with --final)")
+    env_body = found.get("environments", (0, []))[1]
+    data_body = found.get("data & privacy", (0, []))[1]
+    if not any(MESSY_SOURCE.search(l) for l in env_body + data_body):
+        gate.error("S8", "declare where messy real records come from: a line "
+                         "`**Messy records:**` or `**Realistic test data:**` under "
+                         "`## Environments` or `## Data & Privacy`")
     return gate
 
 
@@ -353,6 +374,31 @@ def tagged_ids(tests: str) -> set[str]:
     return tagged
 
 
+def messy_data_tests(tests: str) -> list[dict]:
+    """Test cases whose comment block immediately above includes `# messy-data`."""
+    cases: list[dict] = []
+    pending_messy = False
+    active: dict | None = None
+    for line in tests.splitlines():
+        text = line.strip()
+        if text.startswith("#") and "utterance" not in text:
+            pending_messy = "messy-data" in text.lower()
+        elif re.match(r"-\s*utterance\s*:", text):
+            if pending_messy:
+                active = {}
+                cases.append(active)
+            else:
+                active = None
+            pending_messy = False
+        elif active is not None and re.match(r"recordIds?\s*:", text, re.I):
+            key = "recordIds" if text.lower().startswith("recordids") else "recordId"
+            active[key] = True
+        elif text and not text.startswith("#") and not text.startswith("-"):
+            if active is not None and re.match(r"-\s", line) is None:
+                active = None
+    return cases
+
+
 def gate_coverage(spec_path: str, tests_path: str) -> Gate:
     gate, tests = Gate("coverage"), text_of(tests_path)
     wanted, tested = set(use_case_ids(text_of(spec_path))), tagged_ids(tests)
@@ -370,10 +416,100 @@ def gate_coverage(spec_path: str, tests_path: str) -> Gate:
     if outcomes < cases:
         gate.warn("C5", f"{cases - outcomes} of {cases} test case(s) have no "
                         "`expectedOutcome`", tests_path)
+    spec_text = text_of(spec_path)
+    env = sections(spec_text).get("environments", (0, []))[1]
+    data = sections(spec_text).get("data & privacy", (0, []))[1]
+    if any(MESSY_SOURCE.search(l) for l in env + data):
+        messy = messy_data_tests(tests)
+        if not messy:
+            gate.error("C6", "the spec names a messy-record source but no test case "
+                             "is tagged `# messy-data` on the line above `- utterance:`",
+                       tests_path)
+        elif not any(m.get("recordId") or m.get("recordIds") for m in messy):
+            gate.warn("C7", f"{len(messy)} `# messy-data` test(s) have no `recordId` "
+                            "or `recordIds`: name the sandbox record(s) the case runs against",
+                      tests_path)
+    return gate
+
+
+# ---------------------------------------------------------------- handoff
+
+def handoff_section_body(spec: str) -> str:
+    return "\n".join(sections(spec).get("human handoff", (0, []))[1])
+
+
+def handoff_use_case_lines(spec: str) -> list[str]:
+    _, body = sections(spec).get("use cases", (0, []))
+    return [line for line in body if UC.search(line)
+            and re.search(r"\|\s*handoff\s*\|", line, re.I)]
+
+
+def promises_live_transfer(text: str) -> bool:
+    flat = re.sub(r"\s+", " ", HANDOFF_MODE.sub("", text))
+    if TRANSFER_DENIAL.search(flat):
+        return False
+    return bool(TRANSFER_PROMISE.search(flat))
+
+
+def agent_can_escalate(agent: str) -> bool:
+    return bool(ESCALATE_IN_AGENT.search(agent))
+
+
+def gate_handoff(spec_path: str, agent_path: str) -> Gate:
+    gate = Gate("handoff")
+    spec, agent = text_of(spec_path), text_of(agent_path)
+    handoff = handoff_section_body(spec)
+    offline = bool(HANDOFF_MODE.search(handoff))
+    escalates = agent_can_escalate(agent)
+    handoff_rows = handoff_use_case_lines(spec)
+    spec_promises = promises_live_transfer(handoff) or any(
+        promises_live_transfer(row) for row in handoff_rows)
+    if offline:
+        if escalates:
+            gate.error("H3", "spec declares `**Handoff mode:** support-channels-only` "
+                             "but the `.agent` still references `@utils.escalate`",
+                       agent_path)
+        if spec_promises:
+            gate.error("H4", "support-channels-only handoff must not promise a live "
+                             "transfer in `## Human Handoff` or a `handoff` use case",
+                       spec_path)
+        gate.note("support-channels-only: no live escalation path is required")
+        return gate
+    needs_path = spec_promises or bool(handoff_rows)
+    if needs_path and not escalates:
+        gate.error("H1", "the spec promises or tests a live handoff but the `.agent` "
+                         "has no `@utils.escalate`. Declare `**Handoff mode:** "
+                         "support-channels-only` in `## Human Handoff` if transfer is "
+                         "out of scope", agent_path)
+    if spec_promises and not escalates:
+        gate.error("H2", "`## Human Handoff` or a `handoff` use case promises a transfer "
+                         "the agent cannot perform", spec_path)
     return gate
 
 
 # ---------------------------------------------------------------- org gates
+
+def spec_data_access(spec_path: str) -> tuple[set[str], set[tuple[str, str]], set[str], set[tuple[str, str]]]:
+    """Objects and fields the spec says actions read or write (## Salesforce Data Access table)."""
+    spec = text_of(spec_path)
+    _, body = sections(spec).get("salesforce data access", (0, []))
+    read_obj, read_fld, write_obj, write_fld = set(), set(), set(), set()
+    for line in body:
+        if not line.strip().startswith("|") or line.count("|") < 5:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 5 or cells[0].lower() in ("action", "---", "----"):
+            continue
+        for token in SALESFORCE_OBJECT.findall(cells[1]):
+            read_obj.add(token)
+        for token in SALESFORCE_OBJECT.findall(cells[3] if len(cells) > 3 else ""):
+            write_obj.add(token)
+        for obj, fld in SALESFORCE_FIELD.findall(cells[2]):
+            read_fld.add((obj, f"{obj}.{fld}"))
+        if len(cells) > 4:
+            for obj, fld in SALESFORCE_FIELD.findall(cells[4]):
+                write_fld.add((obj, f"{obj}.{fld}"))
+    return read_obj, read_fld, write_obj, write_fld
 
 def sf(*args: str) -> dict:
     exe = shutil.which("sf")
@@ -404,7 +540,7 @@ def quoted(values) -> str:
                     for v in values)
 
 
-def gate_perms(path: str, org: str) -> Gate:
+def gate_perms(path: str, org: str, spec_path: str | None = None) -> Gate:
     gate, text = Gate("perms"), text_of(path)
     lines = text.splitlines()
     apex = sorted({re.split(r"[$.]", name)[0]
@@ -456,9 +592,59 @@ def gate_perms(path: str, org: str) -> Gate:
                 gate.error("P7", f"`flow://{name}`: flow has no active version")
         if not any((row.get("PermissionSet") or {}).get("PermissionsRunFlow") for row in sets):
             gate.warn("P8", "none of the agent user's permission sets grants Run Flows")
-    gate.note(f"checked {len(apex)} Apex and {len(flows)} Flow target(s) against "
-              f"{len(set_ids)} permission set(s). Field and object permissions for what "
-              "the actions read or write are NOT checked here.")
+    checked_objects = checked_fields = 0
+    if spec_path:
+        read_obj, read_fld, write_obj, write_fld = spec_data_access(spec_path)
+        if read_obj or read_fld or write_obj or write_fld:
+            parents = quoted(set_ids)
+            if read_obj:
+                rows = {row["SobjectType"] for row in soql(
+                    org, "SELECT SobjectType FROM ObjectPermissions "
+                         f"WHERE ParentId IN ({parents}) AND PermissionsRead = true "
+                         f"AND SobjectType IN ({quoted(read_obj)})")}
+                for obj in sorted(read_obj - rows):
+                    gate.error("P9", f"the agent user cannot read object `{obj}` "
+                                     "(declared in `## Salesforce Data Access`)")
+                checked_objects += len(read_obj)
+            if write_obj:
+                rows = {row["SobjectType"] for row in soql(
+                    org, "SELECT SobjectType FROM ObjectPermissions "
+                         f"WHERE ParentId IN ({parents}) AND PermissionsEdit = true "
+                         f"AND SobjectType IN ({quoted(write_obj)})")}
+                for obj in sorted(write_obj - rows):
+                    gate.error("P10", f"the agent user cannot edit object `{obj}` "
+                                      "(declared in `## Salesforce Data Access`)")
+                checked_objects += len(write_obj)
+            if read_fld:
+                fields = sorted({f for _, f in read_fld})
+                granted = {row["Field"] for row in soql(
+                    org, "SELECT Field FROM FieldPermissions "
+                         f"WHERE ParentId IN ({parents}) AND PermissionsRead = true "
+                         f"AND Field IN ({quoted(fields)})")}
+                for _, field in sorted(read_fld):
+                    if field not in granted:
+                        gate.error("P11", f"the agent user cannot read field `{field}` "
+                                          "(declared in `## Salesforce Data Access`)")
+                checked_fields += len(read_fld)
+            if write_fld:
+                fields = sorted({f for _, f in write_fld})
+                granted = {row["Field"] for row in soql(
+                    org, "SELECT Field FROM FieldPermissions "
+                         f"WHERE ParentId IN ({parents}) AND PermissionsEdit = true "
+                         f"AND Field IN ({quoted(fields)})")}
+                for _, field in sorted(write_fld):
+                    if field not in granted:
+                        gate.error("P12", f"the agent user cannot edit field `{field}` "
+                                          "(declared in `## Salesforce Data Access`)")
+                checked_fields += len(write_fld)
+    if checked_objects or checked_fields:
+        gate.note(f"checked {len(apex)} Apex and {len(flows)} Flow target(s), "
+                  f"{checked_objects} object(s) and {checked_fields} field(s) from the spec "
+                  f"against {len(set_ids)} permission set(s)")
+    else:
+        gate.note(f"checked {len(apex)} Apex and {len(flows)} Flow target(s) against "
+                  f"{len(set_ids)} permission set(s). Add `## Salesforce Data Access` to the "
+                  "spec to gate object and field reads/writes")
     return gate
 
 
@@ -600,12 +786,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("spec"); p.add_argument("spec"); p.add_argument("--final", action="store_true")
     p = sub.add_parser("lint"); p.add_argument("agent"); p.add_argument("--final", action="store_true")
     p = sub.add_parser("coverage"); p.add_argument("spec"); p.add_argument("tests")
+    p = sub.add_parser("handoff"); p.add_argument("spec"); p.add_argument("agent")
     p = sub.add_parser("perms"); p.add_argument("agent"); p.add_argument("-o", "--org", required=True)
+    p.add_argument("--spec", help="spec with optional ## Salesforce Data Access for object/field checks")
     p = sub.add_parser("active"); p.add_argument("agent"); p.add_argument("-o", "--org", required=True)
     p.add_argument("--version", type=int)
     p = sub.add_parser("status"); p.add_argument("state")
     p.add_argument("--require", default="spec,lint,coverage")
-    for name in ("spec", "lint", "coverage", "perms", "active"):
+    for name in ("spec", "lint", "coverage", "handoff", "perms", "active"):
         sub.choices[name].add_argument("--state", help="JSON file to record the result in")
     a = parser.parse_args(argv)
     try:
@@ -620,8 +808,11 @@ def main(argv: list[str] | None = None) -> int:
             return gate_lint(a.agent, a.final).finish(a.state, [a.agent])
         if a.gate == "coverage":
             return gate_coverage(a.spec, a.tests).finish(a.state, [a.spec, a.tests])
+        if a.gate == "handoff":
+            return gate_handoff(a.spec, a.agent).finish(a.state, [a.spec, a.agent])
         if a.gate == "perms":
-            return gate_perms(a.agent, a.org).finish(a.state, [a.agent])
+            inputs = [a.agent] + ([a.spec] if a.spec else [])
+            return gate_perms(a.agent, a.org, a.spec).finish(a.state, inputs)
         if a.gate == "active":
             gate = gate_active(a.agent, a.org, a.version)
             code = gate.finish(a.state, [])

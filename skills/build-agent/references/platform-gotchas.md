@@ -8,7 +8,7 @@ The upstream `agentforce-generate` skill has its own `production-gotchas.md` and
 
 A service agent runs as its `default_agent_user`, not as the person who built it. When that user lacks access to an Apex class, a field or an object, the action does not raise an error the conversation can see. It returns empty, the agent carries on, and it may tell the customer it did what it did not do. The symptom reported is "it did not save", never "permission error".
 
-- Check before testing: `gates.py perms` covers the user, Apex class access and Flow state. Field and object permissions are not derivable from the `.agent` file; check them against the fields each action reads and writes.
+- Check before testing: `gates.py perms` covers the user, Apex class access and Flow state. Pass `--spec` when the spec has `## Salesforce Data Access`: then the gate checks object and field reads (and edits if declared) via `ObjectPermissions` and `FieldPermissions`. Without that section, only Apex and Flow targets are checked.
 - Check as the agent user, by query. Confirming the permission set on your own admin user proves nothing.
 - Where it is visible: in a preview trace, the enabled-tools step lists withheld actions with the reason `NO_USER_ACCESS`.
 - A user from `sf org create agent-user` gets the standard Agentforce permission sets and nothing else: no access to your Apex classes. Expect `perms` P5 on its first run ([recorded run](../../../examples/recorded-run)).
@@ -73,3 +73,11 @@ On Windows, the metadata `sf agent publish` retrieves has paths long enough that
 ## Test with the input real people send
 
 Test utterances written by the builder are complete, polite and correctly formatted. Real users send fragments, typos, two questions at once and answers to a question you did not ask. Include those, and include a user who changes their mind halfway.
+
+## Clean sample rows are not the production test
+
+Builders often test on rows they just created. Production traffic hits the oldest accounts: missing emails, legacy duplicate keys, half-filled custom fields, records another integration owns. The spec must name where messy rows live (`**Messy records:**` under `## Environments` or `## Data & Privacy`), and `coverage` requires at least one live test tagged `# messy-data` with a `recordId` pointing at a row in that sandbox.
+
+## A handoff promise without an action
+
+Instructions that say "transfer to support" or "I will connect you to an agent" with no `@utils.escalate` in the `.agent` file fail in production as a confident lie. Either wire `@utils.escalate`, or declare `**Handoff mode:** support-channels-only` in `## Human Handoff` and word the use cases so they only name phone, email or portal links. `gates.py handoff` checks the pairing before deploy.

@@ -21,7 +21,9 @@ testCases:
         message: "I can check that. What is the order number, and the email used on the order?"
 
   # UC-02
+  # messy-data
   - utterance: "Order 00000, email nobody@example.com"
+    recordId: "801000000000001AAA"
     expectedTopic: topic_selector
     expectedActions:
       - lookup_order

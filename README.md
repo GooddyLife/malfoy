@@ -47,7 +47,7 @@ On first use he checks that the `agentforce-*` skills from [forcedotcom/sf-skill
 Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.com/forcedotcom/sf-skills). They do the building. This is what changes when someone conducts them.
 
 <p align="center">
-  <img src="assets/comparison.svg" width="100%" alt="Eleven differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below.">
+  <img src="assets/comparison.svg" width="100%" alt="Thirteen differences between the official Agentforce skills on their own and the same skills conducted by Malfoy. The full text is in the table below.">
 </p>
 
 <details>
@@ -60,7 +60,9 @@ Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.co
 | **When a phase is done** | When the model judges it so: "do not proceed through a blocking result" | When a script exits 0 |
 | **The spec** | Purpose, behaviour, subagents, actions | The same, plus success metric, out of scope, handoff, data and privacy, environments. Rejected while a section is empty or nothing says what the agent must refuse |
 | **Tests against the spec** | "Test coverage maps against it", in prose | Use cases have IDs. `coverage` names the one with no test |
-| **The user the agent runs as** | A setup guide, with queries to run | `perms` checks that user's access to every Apex class the agent calls, in the org |
+| **Messy real records** | Not in the spec template | The spec names a sandbox source (`**Messy records:**`). `coverage` requires a `# messy-data` test against a real row there |
+| **Live handoff** | Handoff wording in instructions only | `handoff` fails when the spec promises a transfer the `.agent` cannot perform, unless `**Handoff mode:** support-channels-only` is declared |
+| **The user the agent runs as** | A setup guide, with queries to run | `perms` checks Apex and Flow access; with `## Salesforce Data Access` in the spec it also checks object and field reads (and edits if declared) |
 | **What the compiler stays quiet about** | Reference pages to read | `lint`: seven rules, with file and line |
 | **"It's active"** | A query in the docs | `active`, pass or fail, before he says the word |
 | **A file edited after its check passed** | Nothing records it | `STALE` |
@@ -81,7 +83,7 @@ Eight phases. He does not skip, and he says which one he is in.
 | 1 | Discovery | Product-owner questions: the one job, use cases, what to refuse, handoff, data, environments | `spec` passes and you approve the spec |
 | 2 | Architecture | Subagents, what is deterministic, which existing Flows and Apex become actions | `spec` passes again |
 | 3 | Persona | Voice, tone, guardrails, scored | the score meets the minimum you agreed |
-| 4 | Build | Writes the Agent Script, compiles it | compile is clean, `lint` and `perms` pass |
+| 4 | Build | Writes the Agent Script, compiles it | compile is clean, `lint`, `handoff` and `perms` pass |
 | 5 | Test | Preview with traces, Testing Center suite, security probing | `coverage` passes and every test passes on trace evidence |
 | 6 | Release | Sandbox, then staging, then production, each by your rules | `status` is `READY`; `active` proves the version, per org |
 | 7 | Observe | Reads real sessions once they exist | optional |
@@ -130,10 +132,11 @@ One file, standard library only, Python 3.9+. It reads; it never writes to an or
 | Gate | Fails when |
 |------|-----------|
 | `doctor` | the Salesforce CLI or a required upstream skill is missing |
-| `spec` | a section is missing or empty, a template placeholder survived, use cases have no IDs, or nothing says what the agent must refuse |
+| `spec` | a section is missing or empty, a template placeholder survived, use cases have no IDs, nothing says what the agent must refuse, or the spec never names where messy real records for testing come from (S8) |
 | `lint` | the `.agent` has a pitfall the compiler stays quiet about: no declared locale, a user ID where a username belongs, a service agent with no agent user. Warns on `#` lines inside a `\|` block (they are prompt text, not comments) and hardcoded record IDs |
-| `coverage` | a use case in the spec has no test tagged with its ID |
-| `perms` | the agent user is missing or inactive, cannot reach an Apex class an action targets, or a Flow target is missing or has no active version |
+| `coverage` | a use case in the spec has no test tagged with its ID, or the spec names messy records but no test is tagged `# messy-data` (C6) |
+| `handoff` | the spec promises a live transfer (in `## Human Handoff` or a `handoff` use case) but the `.agent` has no `@utils.escalate`, or `support-channels-only` is declared while a transfer is still promised (H1–H4) |
+| `perms` | the agent user is missing or inactive, cannot reach an Apex class an action targets, or a Flow target is missing or has no active version. With `--spec` and `## Salesforce Data Access`, also fails when object or field access is missing (P9–P12) |
 | `active` | the agent has no active version in the org, or not the one you expected. On a pass it records which spec, tests and agent file shipped as that version, with the commit |
 | `status` | any required gate failed, never ran, or passed on a file that has changed since. Also shows, per org, whether the files still match the last release (`SHIPPED`) or have moved on (`DRIFT`) |
 
@@ -174,14 +177,14 @@ You can run the gates without Malfoy, in CI or by hand. He would approve.
 
 ## Status
 
-Version 0.2 ([changelog](CHANGELOG.md)). What has been checked, and what has not:
+Version 0.3.0 ([changelog](CHANGELOG.md)). What has been checked, and what has not:
 
 - **Checked:** the gates have unit tests that run on Linux, macOS and Windows on every push. Each test breaks the example in one way and expects the right gate to say so.
 - **Checked:** `perms` and `active` were run against a real sandbox, read-only, including the failing paths. Their logic is also unit-tested with faked org answers.
 - **Checked:** the example `.agent` compiles with no diagnostics on the Agent Script compiler 2.9.27.
 - **Checked:** [a recorded run in a real sandbox](examples/recorded-run): an existing agent taken through every phase to published and active, then removed. The gates caught a handoff promise with no action behind it, a persona at 44/100 and an agent user with no access to the action's Apex class.
 - **Not yet:** a recorded run that ends in a production activation.
-- **Not checked by any gate:** field and object permissions for what each action reads or writes. `perms` says so every time it runs.
+- **Checked when declared:** field and object permissions for what each action reads or writes, if the spec includes `## Salesforce Data Access`. Without that table, `perms` still checks only Apex and Flow targets and says so in its NOTE line.
 
 No gate can promise an agent with no problems in production. They remove the failures that are known and checkable; how the model behaves with real users is what phase 7 is for.
 
@@ -204,6 +207,8 @@ Using another coding agent? The playbook is a plain [Agent Skill](skills/build-a
 **Does it work on Windows?** Yes. The gates are tested there on every push.
 
 **Why "Malfoy"?** Exacting, proud, and insufferable about standards. The resemblance ends there: he is on your side.
+
+**Does Malfoy keep the approved spec next to the version it ships?** Yes. A passing `active` with `--state` appends to `releases.json` beside `state.json`: the org, the version number, a hash of every file each recorded gate checked (spec, tests, agent), the git commit and whether anything was still uncommitted. `status` prints `SHIPPED` while those hashes still match, or `DRIFT` with the files that changed since that release. Diff two commits from the log to see how the contract moved between versions.
 
 ## Contributing
 
