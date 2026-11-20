@@ -5,10 +5,13 @@
     gates.py recon [REPO] [--no-orgs]        repo profile as JSON (read-only)
     gates.py spec SPEC.md [--final]          Agent Spec is complete
     gates.py lint FILE.agent [--final]       pitfalls the compiler does not report
-    gates.py coverage SPEC.md TESTS.yaml     every use case has a test
+    gates.py coverage SPEC.md TESTS.yaml [-o ORG] [--final]
+                                             every use case has a test; with -o, messy rows exist,
+                                             match the declared criterion, and tests use that org
     gates.py handoff SPEC.md FILE.agent      escalation matches the Human Handoff promise
     gates.py perms FILE.agent -o ORG         the agent user can reach the action targets
-    gates.py perms FILE.agent -o ORG --spec SPEC.md   optional object/field access from the spec
+    gates.py perms FILE.agent -o ORG [--spec SPEC.md] [--tests TESTS.yaml]
+                                             optional object/field and record visibility (UserRecordAccess)
     gates.py active AGENT -o ORG [--version N]   which version is active, from the org;
                                              with --state, a pass is logged in releases.json
     gates.py testrun TESTS.yaml -o ORG       record a passing agent test run in the state file
@@ -59,6 +62,14 @@ UC = re.compile(r"\bUC-\d+\b")
 HANDOFF_MODE = re.compile(r"\*\*handoff\s+mode:\*\*\s*support-channels-only", re.I)
 MESSY_SOURCE = re.compile(
     r"\*\*(?:messy\s+records|realistic\s+test\s+data):\*\*", re.I)
+MESSY_STRUCTURED = re.compile(
+    r"\*\*(?:messy\s+records|realistic\s+test\s+data):\*\*\s*org\s+`([^`]+)`\s*;\s*criterion:\s*(.+)",
+    re.I)
+CRITERION_STALE = re.compile(r"stale\s+(LastModifiedDate|CreatedDate)(?:\s*\(>(\d+)d\))?", re.I)
+CRITERION_EMPTY = re.compile(r"empty\s+`([^`]+)`", re.I)
+SOBJECT_NAME = re.compile(r"^[A-Za-z_][\w]*(?:__c)?$")
+FIELD_TOKEN = re.compile(r"^[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)?$")
+STALE_DEFAULT_DAYS = 365
 TRANSFER_PROMISE = re.compile(
     r"\b(?:transfer(?:s|ring)?(?:\s+(?:to|the|right\s+away))?|(?:goes|route[ds]?|connect(?:s|ed)?)\s+to\s+"
     r"(?:a\s+)?(?:person|human|agent|queue)|live\s+(?:agent|handoff)|"
@@ -73,7 +84,7 @@ TOP_BLOCK = re.compile(r"^([A-Za-z_]\w*)(?:\s+[\w.]+)?\s*:")
 LITERAL_BLOCK = re.compile(r"^(\s*)[\w.\-]+\s*:\s*\|[+-]?\d*\s*$")
 SF_TIMEOUT = int(os.environ.get("MALFOY_SF_TIMEOUT", "120"))  # seconds per sf call
 STATE_META = frozenset({"test_run"})  # not gates; do not list in `status` as PASS/FAIL
-RECORD_ID = re.compile(r"""["'](0[0-9A-Za-z]{14}(?:[0-9A-Za-z]{3})?)["']""")
+RECORD_ID = re.compile(r"""["']([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)["']""")
 # Bundled GA dates for seasonal Salesforce releases (calendar is deterministic; patch level is not).
 PLATFORM_RELEASES = [
     ("Winter '24", "2023-10-13"), ("Spring '24", "2024-02-26"), ("Summer '24", "2024-06-10"),
@@ -479,10 +490,25 @@ def gate_spec(path: str, final: bool = False) -> Gate:
                   "(fine now, an error with --final)")
     env_body = found.get("environments", (0, []))[1]
     data_body = found.get("data & privacy", (0, []))[1]
-    if not any(MESSY_SOURCE.search(l) for l in env_body + data_body):
+    messy_lines = [l for l in env_body + data_body if MESSY_SOURCE.search(l)]
+    if not messy_lines:
         gate.error("S8", "declare where messy real records come from: a line "
                          "`**Messy records:**` or `**Realistic test data:**` under "
                          "`## Environments` or `## Data & Privacy`")
+    elif not any(MESSY_STRUCTURED.search(l) for l in messy_lines):
+        gate.error("S8", "structure messy records as "
+                         "`**Messy records:** org `ORG_ALIAS`; criterion: stale "
+                         "LastModifiedDate, empty `Object.Field`, …` "
+                         "(machine-checkable tokens after `criterion:`)")
+    _, actions_body = found.get("actions", (0, []))
+    has_actions = any(l.strip().startswith("### ") for l in actions_body)
+    read_obj, read_fld, write_obj, write_fld = spec_data_access_from_body(
+        sections(spec).get("salesforce data access", (0, []))[1])
+    data_access_empty = not (read_obj or read_fld or write_obj or write_fld)
+    if has_actions and data_access_empty:
+        (gate.error if final else gate.warn)(
+            "S9", "the spec has actions but `## Salesforce Data Access` is missing or "
+                  "empty: object and field permissions are unchecked until you fill the table")
     return gate
 
 
@@ -596,21 +622,21 @@ def messy_data_tests(tests: str) -> list[dict]:
             pending_messy = "messy-data" in text.lower()
         elif re.match(r"-\s*utterance\s*:", text):
             if pending_messy:
-                active = {}
+                active = {"recordIds": []}
                 cases.append(active)
             else:
                 active = None
             pending_messy = False
         elif active is not None and re.match(r"recordIds?\s*:", text, re.I):
-            key = "recordIds" if text.lower().startswith("recordids") else "recordId"
-            active[key] = True
+            active["recordIds"].extend(RECORD_ID.findall(line))
         elif text and not text.startswith("#") and not text.startswith("-"):
             if active is not None and re.match(r"-\s", line) is None:
                 active = None
     return cases
 
 
-def gate_coverage(spec_path: str, tests_path: str) -> Gate:
+def gate_coverage(spec_path: str, tests_path: str, org: str | None = None,
+                  final: bool = False) -> Gate:
     gate, tests = Gate("coverage"), text_of(tests_path)
     wanted, tested = set(use_case_ids(text_of(spec_path))), tagged_ids(tests)
     if not wanted:
@@ -636,10 +662,29 @@ def gate_coverage(spec_path: str, tests_path: str) -> Gate:
             gate.error("C6", "the spec names a messy-record source but no test case "
                              "is tagged `# messy-data` on the line above `- utterance:`",
                        tests_path)
-        elif not any(m.get("recordId") or m.get("recordIds") for m in messy):
-            gate.warn("C7", f"{len(messy)} `# messy-data` test(s) have no `recordId` "
-                            "or `recordIds`: name the sandbox record(s) the case runs against",
-                      tests_path)
+        elif not any(m.get("recordIds") for m in messy):
+            msg = (f"{len(messy)} `# messy-data` test(s) have no `recordId` or `recordIds`: "
+                   "name the sandbox record(s) the case runs against")
+            (gate.error if final else gate.warn)("C7", msg, tests_path)
+        decl = messy_declaration(spec_text)
+        if org and decl:
+            alias, criteria = decl
+            if not org_matches_declared(org, alias):
+                gate.error("C8", f"tests run against org `{org}` but the spec declares messy "
+                                 f"records in `{alias}`", tests_path)
+            sobject = messy_default_sobject(spec_path, criteria)
+            if not sobject:
+                gate.error("C9", "cannot resolve an object for messy-record checks: add "
+                                 r"`empty `Object.Field`` in the criterion or rows in "
+                                 "`## Salesforce Data Access`", spec_path)
+            elif not criteria:
+                gate.warn("C10", "messy-record criterion has no `stale …` or `empty …` "
+                                 "tokens; the gate cannot verify messiness in the org", spec_path)
+            else:
+                for case in messy:
+                    for record_id in case.get("recordIds", []):
+                        for reason in check_messy_record(org, record_id, criteria, sobject):
+                            gate.error("C11", f"`{record_id}`: {reason}", tests_path)
     return gate
 
 
@@ -700,10 +745,7 @@ def gate_handoff(spec_path: str, agent_path: str) -> Gate:
 
 # ---------------------------------------------------------------- org gates
 
-def spec_data_access(spec_path: str) -> tuple[set[str], set[tuple[str, str]], set[str], set[tuple[str, str]]]:
-    """Objects and fields the spec says actions read or write (## Salesforce Data Access table)."""
-    spec = text_of(spec_path)
-    _, body = sections(spec).get("salesforce data access", (0, []))
+def spec_data_access_from_body(body: list[str]) -> tuple[set[str], set[tuple[str, str]], set[str], set[tuple[str, str]]]:
     read_obj, read_fld, write_obj, write_fld = set(), set(), set(), set()
     for line in body:
         if not line.strip().startswith("|") or line.count("|") < 5:
@@ -721,6 +763,128 @@ def spec_data_access(spec_path: str) -> tuple[set[str], set[tuple[str, str]], se
             for obj, fld in SALESFORCE_FIELD.findall(cells[4]):
                 write_fld.add((obj, f"{obj}.{fld}"))
     return read_obj, read_fld, write_obj, write_fld
+
+
+def spec_data_access(spec_path: str) -> tuple[set[str], set[tuple[str, str]], set[str], set[tuple[str, str]]]:
+    """Objects and fields the spec says actions read or write (## Salesforce Data Access table)."""
+    _, body = sections(text_of(spec_path)).get("salesforce data access", (0, []))
+    return spec_data_access_from_body(body)
+
+
+def messy_declaration(spec: str) -> tuple[str, list[dict]] | None:
+    """Declared sandbox alias and parsed machine-checkable criteria, or None."""
+    env = sections(spec).get("environments", (0, []))[1]
+    data = sections(spec).get("data & privacy", (0, []))[1]
+    for line in env + data:
+        match = MESSY_STRUCTURED.search(line)
+        if not match:
+            continue
+        org_alias, criterion_text = match.group(1).strip(), match.group(2).strip()
+        criteria: list[dict] = []
+        for part in re.split(r",\s*(?=(?:stale|empty)\s)", criterion_text):
+            part = part.strip().rstrip(".")
+            stale = CRITERION_STALE.match(part)
+            if stale:
+                days = int(stale.group(2)) if stale.group(2) else STALE_DEFAULT_DAYS
+                criteria.append({"kind": "stale", "field": stale.group(1), "days": days})
+                continue
+            empty = CRITERION_EMPTY.match(part)
+            if empty:
+                criteria.append({"kind": "empty", "field": empty.group(1).strip()})
+        return org_alias, criteria
+    return None
+
+
+def org_auth_target(org: str) -> dict | None:
+    """The org the `-o` flag points at: alias, username, connected."""
+    listing = sf("org", "list")
+    for group in ("nonScratchOrgs", "scratchOrgs"):
+        for row in listing.get(group, []):
+            if org in (row.get("alias"), row.get("username")):
+                return row
+    return None
+
+
+def org_matches_declared(org: str, declared_alias: str) -> bool:
+    if declared_alias.lower() == org.lower():
+        return True
+    try:
+        target = org_auth_target(org)
+    except CannotRun:
+        return False
+    if not target:
+        return False
+    return (target.get("alias") or "").lower() == declared_alias.lower()
+
+
+def messy_default_sobject(spec_path: str, criteria: list[dict]) -> str | None:
+    for item in criteria:
+        if item["kind"] == "empty" and "." in item["field"]:
+            obj = item["field"].split(".", 1)[0]
+            if SOBJECT_NAME.match(obj):
+                return obj
+    read_obj, *_ = spec_data_access(spec_path)
+    return next(iter(sorted(read_obj)), None) if read_obj else None
+
+
+def record_ids_in_tests(tests: str) -> list[str]:
+    ids: list[str] = []
+    for line in tests.splitlines():
+        if re.search(r"recordIds?\s*:", line, re.I):
+            ids.extend(RECORD_ID.findall(line))
+    return ids
+
+
+def check_messy_record(org: str, record_id: str, criteria: list[dict], sobject: str) -> list[str]:
+    """Reasons the row fails the declared criterion. Empty list means it passes."""
+    if not SOBJECT_NAME.match(sobject):
+        return [f"cannot check `{record_id}`: object `{sobject}` is not a valid API name"]
+    fields = {"Id", "LastModifiedDate", "CreatedDate"}
+    for item in criteria:
+        if item["kind"] == "stale":
+            fields.add(item["field"])
+        elif item["kind"] == "empty":
+            token = item["field"]
+            fld = token.split(".", 1)[-1]
+            if SOBJECT_NAME.match(fld) or FIELD_TOKEN.match(fld):
+                fields.add(fld)
+    query = f"SELECT {', '.join(sorted(fields))} FROM {sobject} WHERE Id = '{record_id}'"
+    rows = soql(org, query)
+    if not rows:
+        return [f"`{record_id}` is not in org `{org}` on `{sobject}`"]
+    row = rows[0]
+    reasons: list[str] = []
+    now = datetime.now(timezone.utc)
+    for item in criteria:
+        if item["kind"] == "stale":
+            raw = row.get(item["field"])
+            if not raw:
+                reasons.append(f"`{item['field']}` is empty")
+                continue
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            age = (now - stamp).days
+            if age < item["days"]:
+                reasons.append(f"`{item['field']}` is {age}d old, criterion needs >{item['days']}d")
+        elif item["kind"] == "empty":
+            fld = item["field"].split(".", 1)[-1]
+            val = row.get(fld)
+            if val not in (None, ""):
+                reasons.append(f"`{fld}` is filled (`{val}`), criterion expects empty")
+    if criteria and not reasons:
+        return []
+    if not criteria:
+        return ["no machine-checkable criterion to verify messiness"]
+    return reasons
+
+
+def check_record_visibility(org: str, user_id: str, record_ids: list[str]) -> dict[str, bool]:
+    """Map record Id -> HasReadAccess for the agent user."""
+    if not record_ids:
+        return {}
+    rows = soql(org, "SELECT RecordId, HasReadAccess FROM UserRecordAccess "
+                   f"WHERE UserId = '{user_id}' AND RecordId IN ({quoted(record_ids)})")
+    return {row["RecordId"]: bool(row.get("HasReadAccess")) for row in rows}
+
 
 def sf(*args: str) -> dict:
     exe = shutil.which("sf")
@@ -751,7 +915,8 @@ def quoted(values) -> str:
                     for v in values)
 
 
-def gate_perms(path: str, org: str, spec_path: str | None = None) -> Gate:
+def gate_perms(path: str, org: str, spec_path: str | None = None,
+               tests_path: str | None = None) -> Gate:
     gate, text = Gate("perms"), text_of(path)
     lines = text.splitlines()
     apex = sorted({re.split(r"[$.]", name)[0]
@@ -848,6 +1013,16 @@ def gate_perms(path: str, org: str, spec_path: str | None = None) -> Gate:
                         gate.error("P12", f"the agent user cannot edit field `{field}` "
                                           "(declared in `## Salesforce Data Access`)")
                 checked_fields += len(write_fld)
+    record_ids = record_ids_in_tests(text_of(tests_path)) if tests_path else []
+    if record_ids:
+        visibility = check_record_visibility(org, person["Id"], record_ids)
+        for record_id in sorted(set(record_ids)):
+            if record_id not in visibility:
+                gate.error("P13", f"record `{record_id}` was not returned by UserRecordAccess "
+                                  "(missing or not shared to the agent user)")
+            elif not visibility[record_id]:
+                gate.error("P13", f"record `{record_id}` is not readable by the agent user "
+                                  "(OWD or sharing rules hide it even when field access exists)")
     if checked_objects or checked_fields:
         gate.note(f"checked {len(apex)} Apex and {len(flows)} Flow target(s), "
                   f"{checked_objects} object(s) and {checked_fields} field(s) from the spec "
@@ -856,6 +1031,9 @@ def gate_perms(path: str, org: str, spec_path: str | None = None) -> Gate:
         gate.note(f"checked {len(apex)} Apex and {len(flows)} Flow target(s) against "
                   f"{len(set_ids)} permission set(s). Add `## Salesforce Data Access` to the "
                   "spec to gate object and field reads/writes")
+    if record_ids:
+        gate.note(f"checked read access to {len(set(record_ids))} test record(s) via "
+                  "UserRecordAccess")
     return gate
 
 
@@ -1009,9 +1187,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("spec"); p.add_argument("spec"); p.add_argument("--final", action="store_true")
     p = sub.add_parser("lint"); p.add_argument("agent"); p.add_argument("--final", action="store_true")
     p = sub.add_parser("coverage"); p.add_argument("spec"); p.add_argument("tests")
+    p.add_argument("-o", "--org", help="org where tests run: messy rows must exist there")
+    p.add_argument("--final", action="store_true")
     p = sub.add_parser("handoff"); p.add_argument("spec"); p.add_argument("agent")
     p = sub.add_parser("perms"); p.add_argument("agent"); p.add_argument("-o", "--org", required=True)
     p.add_argument("--spec", help="spec with optional ## Salesforce Data Access for object/field checks")
+    p.add_argument("--tests", help="tests.yaml: UserRecordAccess on recordId / recordIds rows")
     p = sub.add_parser("active"); p.add_argument("agent"); p.add_argument("-o", "--org", required=True)
     p.add_argument("--version", type=int)
     p = sub.add_parser("testrun"); p.add_argument("tests")
@@ -1039,12 +1220,12 @@ def main(argv: list[str] | None = None) -> int:
         if a.gate == "lint":
             return gate_lint(a.agent, a.final).finish(a.state, [a.agent])
         if a.gate == "coverage":
-            return gate_coverage(a.spec, a.tests).finish(a.state, [a.spec, a.tests])
+            return gate_coverage(a.spec, a.tests, a.org, a.final).finish(a.state, [a.spec, a.tests])
         if a.gate == "handoff":
             return gate_handoff(a.spec, a.agent).finish(a.state, [a.spec, a.agent])
         if a.gate == "perms":
-            inputs = [a.agent] + ([a.spec] if a.spec else [])
-            return gate_perms(a.agent, a.org, a.spec).finish(a.state, inputs)
+            inputs = [a.agent] + ([a.spec] if a.spec else []) + ([a.tests] if a.tests else [])
+            return gate_perms(a.agent, a.org, a.spec, a.tests).finish(a.state, inputs)
         if a.gate == "active":
             gate = gate_active(a.agent, a.org, a.version)
             code = gate.finish(a.state, [])

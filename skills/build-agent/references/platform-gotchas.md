@@ -8,7 +8,7 @@ The upstream `agentforce-generate` skill has its own `production-gotchas.md` and
 
 A service agent runs as its `default_agent_user`, not as the person who built it. When that user lacks access to an Apex class, a field or an object, the action does not raise an error the conversation can see. It returns empty, the agent carries on, and it may tell the customer it did what it did not do. The symptom reported is "it did not save", never "permission error".
 
-- Check before testing: `gates.py perms` covers the user, Apex class access and Flow state. Pass `--spec` when the spec has `## Salesforce Data Access`: then the gate checks object and field reads (and edits if declared) via `ObjectPermissions` and `FieldPermissions`. Without that section, only Apex and Flow targets are checked.
+- Check before testing: `gates.py perms` covers the user, Apex class access and Flow state. Pass `--spec` when the spec has `## Salesforce Data Access`: then the gate checks object and field reads (and edits if declared) via `ObjectPermissions` and `FieldPermissions`. Pass `--tests` so `UserRecordAccess` validates every `recordId` in the suite. With actions declared, `spec --final` errors (S9) until the data-access table is filled.
 - Check as the agent user, by query. Confirming the permission set on your own admin user proves nothing.
 - Where it is visible: in a preview trace, the enabled-tools step lists withheld actions with the reason `NO_USER_ACCESS`.
 - A user from `sf org create agent-user` gets the standard Agentforce permission sets and nothing else: no access to your Apex classes. Expect `perms` P5 on its first run ([recorded run](../../../examples/recorded-run)).
@@ -84,7 +84,7 @@ Test utterances written by the builder are complete, polite and correctly format
 
 ## Clean sample rows are not the production test
 
-Builders often test on rows they just created. Production traffic hits the oldest accounts: missing emails, legacy duplicate keys, half-filled custom fields, records another integration owns. The spec must name where messy rows live (`**Messy records:**` under `## Environments` or `## Data & Privacy`), and `coverage` requires at least one live test tagged `# messy-data` with a `recordId` pointing at a row in that sandbox.
+Builders often test on rows they just created. Production traffic hits the oldest accounts: missing emails, legacy duplicate keys, half-filled custom fields, records another integration owns. The spec must name where messy rows live as structured text, for example `**Messy records:** org \`Acme_Staging\`; criterion: stale LastModifiedDate (>730d), empty \`Account.PersonEmail\`` under `## Environments` or `## Data & Privacy`. `coverage` requires at least one live test tagged `# messy-data` with a `recordId` pointing at a row in that sandbox. Run `coverage -o` that sandbox before release: the gate checks the org alias (C8), that the row exists and is messy per the criterion (C11), and `perms --tests` checks the agent user can see the row (P13), not only its fields.
 
 ## A handoff promise without an action
 

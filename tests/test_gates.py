@@ -124,6 +124,40 @@ class GatesTest(unittest.TestCase):
         no_messy = TESTS.replace("# messy-data\n", "")
         self.assertIn("C6", self.codes(gates.gate_coverage(spec, self.file("t.yaml", no_messy))))
 
+    def test_spec_structured_messy_records_and_data_access_warning(self):
+        prose = SPEC.replace(
+            "**Messy records:** org `Acme_Staging`; criterion:",
+            "**Messy records:** partial-copy sandbox", 1)
+        self.assertIn("S8", self.codes(gates.gate_spec(self.file("spec.md", prose))))
+        no_table = SPEC.replace("## Salesforce Data Access\n\n", "## Salesforce Data Access\n\n<!--\n", 1)
+        no_table = no_table.replace(
+            "| lookup_order | `Order__c` |", "| lookup_order |", 1).split("## Agent Configuration")[0] + "## Agent Configuration" + SPEC.split("## Agent Configuration", 1)[1]
+        # simpler: empty the table rows
+        stripped_access = re.sub(
+            r"(## Salesforce Data Access\n\n\| Action.*?\n\|--------.*?\n)\|[^\n]+\n",
+            r"\1", SPEC, count=1, flags=re.S)
+        gate = gates.gate_spec(self.file("spec.md", stripped_access))
+        self.assertIn("S9", self.codes(gate))
+        self.assertIn("S9", self.codes(gates.gate_spec(self.file("s.md", stripped_access), final=True)))
+
+    def test_coverage_final_and_org_messy_checks(self):
+        spec, tests = self.file("spec.md", SPEC), self.file("tests.yaml", TESTS)
+        no_id = TESTS.replace('recordId: "801000000000001AAA"\n', "")
+        self.assertIn("C7", self.codes(gates.gate_coverage(spec, self.file("t.yaml", no_id), final=True)))
+        self.assertIn("C7", {c for c, _, _ in gates.gate_coverage(
+            spec, self.file("t.yaml", no_id)).warns})
+        old_soql = gates.soql
+        gates.soql = FakeOrg(Order__c=[{
+            "Id": "801000000000001AAA", "LastModifiedDate": "2020-01-01T00:00:00.000+0000",
+            "CreatedDate": "2020-01-01T00:00:00.000+0000", "Customer_Email__c": None}])
+        self.addCleanup(setattr, gates, "soql", old_soql)
+        self.assertEqual(gates.gate_coverage(spec, tests, org="Acme_Staging").errors, [])
+        self.assertIn("C8", self.codes(gates.gate_coverage(spec, tests, org="wrong_org")))
+        gates.soql = FakeOrg(Order__c=[{
+            "Id": "801000000000001AAA", "LastModifiedDate": "2025-01-01T00:00:00.000+0000",
+            "CreatedDate": "2025-01-01T00:00:00.000+0000", "Customer_Email__c": "a@b.c"}])
+        self.assertIn("C11", self.codes(gates.gate_coverage(spec, tests, org="Acme_Staging")))
+
     def test_coverage_ignores_tags_not_on_a_live_test_case(self):
         spec, untagged = self.file("spec.md", SPEC), TESTS.replace("# UC-04", "#")
         for where in ("\n  # - utterance: later  # UC-04\n",   # commented-out test case
@@ -251,6 +285,32 @@ class OrgGatesTest(unittest.TestCase):
                 "Order__c.Status__c", "Order__c.Estimated_Delivery__c",
                 "Order__c.Customer_Email__c")])
         self.assertEqual(gates.gate_perms(self.agent, "fake", str(spec)).errors, [])
+
+    def test_perms_record_visibility(self):
+        spec = Path(self.dir.name) / "spec.md"
+        spec.write_text(SPEC, encoding="utf-8")
+        tests = Path(self.dir.name) / "tests.yaml"
+        tests.write_text(TESTS, encoding="utf-8")
+        gates.soql = FakeOrg(
+            User=[AGENT_USER], PermissionSetAssignment=[ASSIGNED],
+            ApexClass=[{"Id": "01p000000000001AAA", "Name": "OrderService"}],
+            SetupEntityAccess=[{"SetupEntityId": "01p000000000001AAA"}],
+            FlowDefinitionView=[FLOW_OK],
+            UserRecordAccess=[{"RecordId": "801000000000001AAA", "HasReadAccess": False}])
+        gate = gates.gate_perms(self.agent, "fake", str(spec), str(tests))
+        self.assertIn("P13", {c for c, _, _ in gate.errors})
+        gates.soql = FakeOrg(
+            User=[AGENT_USER], PermissionSetAssignment=[ASSIGNED],
+            ApexClass=[{"Id": "01p000000000001AAA", "Name": "OrderService"}],
+            SetupEntityAccess=[{"SetupEntityId": "01p000000000001AAA"}],
+            FlowDefinitionView=[FLOW_OK],
+            ObjectPermissions=[{"SobjectType": "Order__c"}],
+            FieldPermissions=[{"Field": f} for f in (
+                "Order__c.Status__c", "Order__c.Estimated_Delivery__c",
+                "Order__c.Customer_Email__c")],
+            UserRecordAccess=[{"RecordId": "801000000000001AAA", "HasReadAccess": True}])
+        errors = {c for c, _, _ in gates.gate_perms(self.agent, "fake", str(spec), str(tests)).errors}
+        self.assertFalse(errors & {"P13"}, errors)
 
     def test_perms_failures(self):
         self.assertEqual(self.perms(), {"P1"})

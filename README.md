@@ -60,7 +60,7 @@ Malfoy runs on top of Salesforce's own [`agentforce-*` skills](https://github.co
 | **When a phase is done** | When the model judges it so: "do not proceed through a blocking result" | When a script exits 0 |
 | **The spec** | Purpose, behaviour, subagents, actions | The same, plus success metric, out of scope, handoff, data and privacy, environments. Rejected while a section is empty or nothing says what the agent must refuse |
 | **Tests against the spec** | "Test coverage maps against it", in prose | Use cases have IDs. `coverage` names the one with no test |
-| **Messy real records** | Not in the spec template | The spec names a sandbox source (`**Messy records:**`). `coverage` requires a `# messy-data` test against a real row there |
+| **Messy real records** | Not in the spec template | Structured `**Messy records:** org \`…\`; criterion: …`. `coverage -o` proves the row exists, is messy, and runs in the declared org |
 | **Live handoff** | Handoff wording in instructions only | `handoff` fails when the spec promises a transfer the `.agent` cannot perform, unless `**Handoff mode:** support-channels-only` is declared |
 | **The user the agent runs as** | A setup guide, with queries to run | `perms` checks Apex and Flow access; with `## Salesforce Data Access` in the spec it also checks object and field reads (and edits if declared) |
 | **What the compiler stays quiet about** | Reference pages to read | `lint`: seven rules, with file and line |
@@ -132,11 +132,11 @@ One file, standard library only, Python 3.9+. It reads; it never writes to an or
 | Gate | Fails when |
 |------|-----------|
 | `doctor` | the Salesforce CLI or a required upstream skill is missing |
-| `spec` | a section is missing or empty, a template placeholder survived, use cases have no IDs, nothing says what the agent must refuse, or the spec never names where messy real records for testing come from (S8) |
+| `spec` | a section is missing or empty, a template placeholder survived, use cases have no IDs, nothing says what the agent must refuse, messy records are not structured (S8), or actions exist but `## Salesforce Data Access` is empty at `--final` (S9) |
 | `lint` | the `.agent` has a pitfall the compiler stays quiet about: no declared locale, a user ID where a username belongs, a service agent with no agent user. Warns on `#` lines inside a `\|` block (they are prompt text, not comments) and hardcoded record IDs |
-| `coverage` | a use case in the spec has no test tagged with its ID, or the spec names messy records but no test is tagged `# messy-data` (C6) |
+| `coverage` | a use case in the spec has no test tagged with its ID, the spec names messy records but no test is tagged `# messy-data` (C6), the org alias does not match (C8), or a messy `recordId` is missing or not messy in the org (C7, C11) |
 | `handoff` | the spec promises a live transfer (in `## Human Handoff` or a `handoff` use case) but the `.agent` has no `@utils.escalate`, or `support-channels-only` is declared while a transfer is still promised (H1–H4) |
-| `perms` | the agent user is missing or inactive, cannot reach an Apex class an action targets, or a Flow target is missing or has no active version. With `--spec` and `## Salesforce Data Access`, also fails when object or field access is missing (P9–P12) |
+| `perms` | the agent user is missing or inactive, cannot reach an Apex class an action targets, or a Flow target is missing or has no active version. With `--spec` and `## Salesforce Data Access`, also fails when object or field access is missing (P9–P12). With `--tests`, fails when `UserRecordAccess` denies a test `recordId` (P13) |
 | `active` | the agent has no active version in the org, or not the one you expected. On a pass it records which spec, tests and agent file shipped as that version, with the commit |
 | `testrun` | there is no evidence of a passing agent test run. On success it records org API version and platform release for later `RETEST` hints |
 | `observe` | the Success Metric cannot be parsed, session data is missing, or the measured rate is below target (warn only) |
@@ -186,7 +186,7 @@ Version 0.3.0 ([changelog](CHANGELOG.md)). What has been checked, and what has n
 - **Checked:** the example `.agent` compiles with no diagnostics on the Agent Script compiler 2.9.27.
 - **Checked:** [a recorded run in a real sandbox](examples/recorded-run): an existing agent taken through every phase to published and active, then removed. The gates caught a handoff promise with no action behind it, a persona at 44/100 and an agent user with no access to the action's Apex class.
 - **Not yet:** a recorded run that ends in a production activation.
-- **Checked when declared:** field and object permissions for what each action reads or writes, if the spec includes `## Salesforce Data Access`. Without that table, `perms` still checks only Apex and Flow targets and says so in its NOTE line.
+- **Checked when declared:** field and object permissions for what each action reads or writes, if the spec includes `## Salesforce Data Access`. Without that table, `perms` still checks only Apex and Flow targets and says so in its NOTE line. With `--tests`, it also checks record-level visibility for every `recordId` in the suite.
 
 No gate can promise an agent with no problems in production. They remove the failures that are known and checkable; how the model behaves with real users is what phase 7 is for.
 

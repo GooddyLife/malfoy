@@ -36,7 +36,7 @@ Found while reverse-engineering: the original instructions told the agent to "of
 
 Reads: protocol status and next step, from an in-memory made-up table in the Apex class (no SOQL, no DML). Collects: the protocol code only. Never asks for or repeats an ID number, a health plan card number, an address, a phone number or health data. Stores nothing.
 
-**Messy records:** the sandbox org used in the recorded run. Mix deliberately messy protocol codes in tests (`1001`, `prt 1001`, empty strings), not only canonical `PRT-1001` rows.
+**Messy records:** org `Acme_Recorded_Sandbox`; criterion: empty `Case.Subject`, stale LastModifiedDate (>365d). Mix deliberately messy protocol codes in tests (`1001`, `prt 1001`, empty strings), not only canonical `PRT-1001` rows.
 
 ## Environments
 

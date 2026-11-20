@@ -15,7 +15,7 @@ ROWS = [  # label, the official skills on their own, the same skills conducted b
     ("Phase is done", "When the model judges it so", "When a script exits 0"),
     ("The spec", "Purpose, behaviour, subagents, actions", "+ metric, scope, handoff, data, envs"),
     ("Tests vs. spec", "\"Coverage maps against it\", in prose", "coverage names the untested use case"),
-    ("Messy real records", "Not in the template", "spec S8 + coverage C6 on sandbox rows"),
+    ("Messy real records", "Not in the template", "S8 structure + coverage -o/C11 + perms P13"),
     ("Live handoff", "Instructions only", "handoff: escalate or support-channels-only"),
     ("The agent user", "A setup guide, with queries to run", "perms + optional object/field rows"),
     ("Compiler gaps", "Reference pages to read", "lint: seven rules, file and line"),
