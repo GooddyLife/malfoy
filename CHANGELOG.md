@@ -34,6 +34,7 @@ Every gate was run against a real full-copy sandbox with a dedicated read-only d
 - **`observe`** read `SELECT COUNT()` from `records` (always empty; the count is `totalSize`) and counted sessions created after the window instead of inside it. It now counts the window `[release, release + N days]` and says the MessagingSession proxy is org-wide.
 - **`coverage` C7/C11 and `perms` P13** lost `recordId` when another key (`expectedTopic`, …) came before it in the case, so the org checks of messy rows never ran. One parser now reads the whole case, in any key order, including `recordIds:` lists; tags anywhere in the comment block count.
 - **`perms` P11** failed on fields that have no `FieldPermissions` row by design (`CaseNumber`, `Status`, `LastModifiedDate`, `Name`). It reads `EntityParticle.IsPermissionable`: those fields follow the object, and a declared field the object does not have is a P11 error.
+- **`perms` P13** crashed (exit 2) when a test named a well-formed Id that is not in the org: UserRecordAccess fails the whole query with "invalid parameter value". It now retries Id by Id and reports the missing one as P13.
 - **`perms` P8** no longer counts an Omni-Channel `outbound_route_name` flow as a flow the agent user runs.
 - **`lint` L6** read 15-letter words such as `OmniChannelFlow` as record Ids. Ids now need the reserved `0` in position 6.
 - **`status`** given `releases.json` crashed with a `TypeError`; it now exits 2 with a clear message.

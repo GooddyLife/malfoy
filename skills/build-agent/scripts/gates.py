@@ -1381,8 +1381,22 @@ def check_record_visibility(org: str, user_id: str, record_ids: list[str]) -> di
     """Map record Id -> HasReadAccess for the agent user."""
     if not record_ids:
         return {}
-    rows = soql(org, "SELECT RecordId, HasReadAccess FROM UserRecordAccess "
-                   f"WHERE UserId = '{user_id}' AND RecordId IN ({quoted(record_ids)})")
+    query = ("SELECT RecordId, HasReadAccess FROM UserRecordAccess "
+             f"WHERE UserId = '{user_id}' AND RecordId IN ({{}})")
+    try:
+        rows = soql(org, query.format(quoted(record_ids)))
+    except CannotRun as exc:
+        # One Id that does not exist fails the whole query with "invalid parameter value";
+        # ask one by one so the others are still checked and the missing one is a P13.
+        if "invalid parameter value" not in str(exc).lower():
+            raise
+        rows = []
+        for record_id in dict.fromkeys(record_ids):
+            try:
+                rows += soql(org, query.format(quoted([record_id])))
+            except CannotRun as one:
+                if "invalid parameter value" not in str(one).lower():
+                    raise
     return {row["RecordId"]: bool(row.get("HasReadAccess")) for row in rows}
 
 

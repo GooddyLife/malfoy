@@ -693,6 +693,32 @@ class RealOrgShapesTest(unittest.TestCase):
                          [("P11", "Order__c.Typo__c")])
         self.assertIn("Order__c.Name", " ".join(gate.notes))
 
+    def test_perms_record_that_does_not_exist_is_a_p13_not_a_crash(self):
+        # measured: UserRecordAccess with one well-formed Id that is not in the org fails the
+        # whole query with "invalid parameter value"
+        def fake(org, query):
+            if "FROM UserRecordAccess" in query:
+                if "801000000000009AAA" in query:
+                    raise gates.CannotRun("`sf data query` failed: invalid parameter value")
+                return [{"RecordId": "801000000000001AAA", "HasReadAccess": True}]
+            return FakeOrg(User=[AGENT_USER], PermissionSetAssignment=[ASSIGNED],
+                           ApexClass=[{"Id": "01p000000000001AAA", "Name": "OrderService"}],
+                           SetupEntityAccess=[{"SetupEntityId": "01p000000000001AAA"}],
+                           FlowDefinitionView=[FLOW_OK])(org, query)
+        gates.soql = fake
+        agent = self.file("a.agent", AGENT + '\n            target: "apex://OrderService"\n')
+        tests = self.file("t.yaml", TESTS.replace(
+            'recordId: "801000000000001AAA"',
+            'recordIds: ["801000000000001AAA", "801000000000009AAA"]'))
+        gate = gates.gate_perms(agent, "fake", tests_path=tests)
+        self.assertEqual([(c, m.split("`")[1]) for c, _, m in gate.errors],
+                         [("P13", "801000000000009AAA")])
+        def offline(org, query):
+            raise gates.CannotRun("`sf data query` gave no answer in 120s")
+        with self.assertRaises(gates.CannotRun):
+            gates.soql = offline
+            gates.check_record_visibility("fake", "005000000000001AAA", ["801000000000001AAA"])
+
     def test_perms_route_flow_does_not_need_run_flows(self):
         agent = self.file("a.agent", AGENT.replace("flow://Lookup_Order", "apex://OrderService")
                           + '\nconnection messaging:\n    outbound_route_type: "OmniChannelFlow"\n'
