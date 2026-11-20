@@ -1200,6 +1200,15 @@ def record_ids_in_tests(tests: str) -> list[str]:
     return ids
 
 
+def parse_sf_datetime(raw: str) -> datetime:
+    """Salesforce timestamps use `+0000`; Python before 3.11 needs `+00:00` for fromisoformat."""
+    s = raw.strip().replace("Z", "+00:00")
+    match = re.match(r"^(.*)([+-])(\d{2})(\d{2})$", s)
+    if match:
+        s = f"{match.group(1)}{match.group(2)}{match.group(3)}:{match.group(4)}"
+    return datetime.fromisoformat(s)
+
+
 def check_messy_record(org: str, record_id: str, criteria: list[dict], sobject: str) -> list[str]:
     """Reasons the row fails the declared criterion. Empty list means it passes."""
     if not SOBJECT_NAME.match(sobject):
@@ -1226,7 +1235,7 @@ def check_messy_record(org: str, record_id: str, criteria: list[dict], sobject: 
             if not raw:
                 reasons.append(f"`{item['field']}` is empty")
                 continue
-            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            stamp = parse_sf_datetime(raw)
             age = (now - stamp).days
             if age < item["days"]:
                 reasons.append(f"`{item['field']}` is {age}d old, criterion needs >{item['days']}d")
