@@ -8,7 +8,7 @@ The upstream `agentforce-generate` skill has its own `production-gotchas.md` and
 
 A service agent runs as its `default_agent_user`, not as the person who built it. When that user lacks access to an Apex class, a field or an object, the action does not raise an error the conversation can see. It returns empty, the agent carries on, and it may tell the customer it did what it did not do. The symptom reported is "it did not save", never "permission error".
 
-- Check before testing: `gates.py perms` covers the user, Apex class access and Flow state. Field and object permissions are not derivable from the `.agent` file; check them against the fields each action reads and writes.
+- Check before testing: `gates.py perms` covers the user, Apex class access and Flow state. Pass `--spec` when the spec has `## Salesforce Data Access`: then the gate checks object and field reads (and edits if declared) via `ObjectPermissions` and `FieldPermissions`. Pass `--tests` so `UserRecordAccess` validates every `recordId` in the suite. With actions declared, `spec --final` errors (S9) until the data-access table is filled.
 - Check as the agent user, by query. Confirming the permission set on your own admin user proves nothing.
 - Where it is visible: in a preview trace, the enabled-tools step lists withheld actions with the reason `NO_USER_ACCESS`.
 - A user from `sf org create agent-user` gets the standard Agentforce permission sets and nothing else: no access to your Apex classes. Expect `perms` P5 on its first run ([recorded run](../../../examples/recorded-run)).
@@ -64,6 +64,14 @@ Measured on a sandbox with Salesforce CLI 2.140 and a published Agent Script age
 
 `sf project delete source` on the `Bot`, `GenAiPlannerBundle` and `AiAuthoringBundle` of a published agent fails with `invalid cross reference id`: the pieces reference each other. Deactivate it (`sf agent deactivate`, then `gates.py active` to prove it), and delete it in Setup. A draft that was never published can be deleted with the CLI. Use names that make a test agent obvious.
 
+## SHIPPED agents still need tests after a platform season
+
+Malfoy does not know your org's patch version. It compares the last recorded passing `testrun` (in `state.json`) to a bundled list of seasonal GA dates and to `Organization.ApiVersion`. When `status` or `doctor` prints `RETEST`, re-run the agent suite and `testrun` before trusting production behaviour. Patch-only Salesforce changes are not detected.
+
+## Success Metric data is usually not plain SOQL
+
+`gates.py observe` uses `MessagingSession` as a read-only proxy (bot sessions; transfer ≈ `EndedByType = 'BotToAgent'` or `CaseId` set). Agentforce Session Tracing and escalation rates in production often live in Data Cloud / Tableau Next. When M5 fires, pass documented counts with `--input` or use `agentforce-observe`.
+
 ## The CLI fails intermittently
 
 During one session, `sf agent preview` returned `Agent ... not found` and `read EINVAL` between calls that worked, `sf agent test run` lost its poll the same way, and `sf agent publish` once failed with `Error refreshing connection`. Retrying worked each time. Before retrying a publish, query `BotVersion` to see whether the first attempt created a version. A lost test poll can be resumed with `sf agent test results --job-id`.
@@ -73,3 +81,15 @@ On Windows, the metadata `sf agent publish` retrieves has paths long enough that
 ## Test with the input real people send
 
 Test utterances written by the builder are complete, polite and correctly formatted. Real users send fragments, typos, two questions at once and answers to a question you did not ask. Include those, and include a user who changes their mind halfway.
+
+## Clean sample rows are not the production test
+
+Builders often test on rows they just created. Production traffic hits the oldest accounts: missing emails, legacy duplicate keys, half-filled custom fields, records another integration owns. The spec must name where messy rows live as structured text, for example `**Messy records:** org \`Acme_Staging\`; criterion: stale LastModifiedDate (>730d), empty \`Account.PersonEmail\`` under `## Environments` or `## Data & Privacy`. `coverage` requires at least one live test tagged `# messy-data` with a `recordId` pointing at a row in that sandbox. Run `coverage -o` that sandbox before release: the gate checks the org alias (C8), that the row exists and is messy per the criterion (C11), and `perms --tests` checks the agent user can see the row (P13), not only its fields.
+
+## A handoff promise without an action
+
+Instructions that say "transfer to support" or "I will connect you to an agent" with no escalation wired fail in production as a confident lie. Wire the target named in `**Escalation target:**` (default `@utils.escalate`, or a Flow/Apex action), or declare `**Handoff mode:** support-channels-only` in `## Human Handoff` and word informational `handoff` use cases so they only name phone, email or portal links without promising a transfer.
+
+`handoff` checks the spec, the `.agent` (including reasoning/system instructions, with a keyword heuristic in support-channels-only mode), and—when you pass `--tests`—that live handoff cases list an escalation action in `expectedActions`. With `--results`, it checks org traces for an escalation step (heuristic name match).
+
+Tag each refuse line from `## Out of Scope` with `# OOS-01`, `# OOS-02`, … on a test case. Customer-facing agents need at least one test tagged `# security` or `# prompt-injection`.

@@ -2,12 +2,31 @@
 
 ## Unreleased
 
-Lessons from [the recorded run](examples/recorded-run):
+Nothing yet.
 
-- The example's `tests.yaml` named actions by their reasoning alias and the topic by the `start_agent` block. The Testing Center reports the action definition name and `topic_selector`; the example now uses both.
-- Phase 5: judge anything that depends on an action's result with live actions, because simulated actions invent the result.
-- Phase 0: `recon --no-orgs` when the session is recorded or shared.
-- `platform-gotchas.md`: simulated actions, Testing Center names, published agents that the Metadata API cannot delete, intermittent CLI failures, Windows long paths, and the first `perms` run of a new agent user.
+## 0.3.0 (2026-11-20)
+
+Acknowledgements: thank **Arjun Gupta** and **Mohith Kumar** for feedback on LinkedIn that drove these changes.
+
+### Added
+
+- **`handoff` gate** (H1–H4, plus H5–H11). Still fails when the spec promises a live transfer but the `.agent` has no escalation path, when `**Handoff mode:** support-channels-only` still promises a transfer, or when that mode is declared while `@utils.escalate` remains wired. Also: optional `**Escalation target:**` cross-check (H6); informational `handoff` use cases no longer force a live path; live-transfer wording in `.agent` instructions is scanned (H5/H9, heuristic); with `--tests`, live handoff use cases must list escalation in `expectedActions` (H7–H8); with `--results`, org traces must show an escalation action (H10–H11).
+- **Messy real records in the contract.** S8 requires structured `org \`ALIAS\`; criterion: …` with tokens such as `stale LastModifiedDate`, `empty \`Object.Field\``. `coverage` C6–C7 (`# messy-data`, `recordId`); with `coverage -o`, C8–C11 verify org alias, object resolution, and messy rows in SOQL.
+- **`coverage` refuse and security** (C12–C14). Each `## Out of Scope` item becomes `OOS-nn` and must appear on a test; customer-facing agents need `# security` or `# prompt-injection` (C13).
+- **`## Salesforce Data Access` when there are actions.** S9 warns while actions exist but the table is empty, and errors with `--final`.
+- **Record visibility for the agent user.** `perms --tests TESTS.yaml` uses read-only `UserRecordAccess` on every `recordId` / `recordIds` in the tests (P13): field access alone does not prove the row is visible under OWD and sharing.
+- **`## Salesforce Data Access`** in the spec (optional table). `perms --spec` checks `ObjectPermissions` and `FieldPermissions` for declared reads and edits (P9–P12). Without the section, behaviour matches 0.2.0.
+- Unit tests for every new rule, with org answers faked as before.
+- README FAQ: which spec and tests shipped as which org version (`releases.json` + `DRIFT`).
+- Comparison table rows for messy records and live handoff.
+- **`testrun` gate** (T1–T4). Records a passing agent test run in `state.json` (`test_run`: timestamp, org API version, bundled platform release, hash of `tests.yaml`). `status` and `doctor --state` emit `RETEST` (T1–T3) when a `SHIPPED` org needs the suite again after a seasonal GA or API upgrade; bundled GA dates are deterministic, patch levels are not.
+- **`observe` gate** (M1–M5). Post-launch check of `## Success Metric` against MessagingSession SOQL or `--input` JSON; warns below target (M4), never blocks release. Documents when Data Cloud observability is the faithful source.
+- Phase 7 in the playbook is mandatory: `testrun`, `observe`, and `status -o` for `RETEST`.
+
+### Changed
+
+- Playbook, discovery reference and `examples/order-status` updated so the example passes the new gates.
+- `platform-gotchas.md`: messy-record testing, handoff without an action, and how `perms --spec` works.
 
 ## 0.2.0 (2026-11-16)
 

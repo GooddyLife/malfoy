@@ -31,18 +31,24 @@ the order.
 On request, at any point. Also after two lookups in a row that find nothing. The chat goes
 to the Customer Care queue with the conversation attached.
 
+**Escalation target:** `@utils.escalate`
+
 ## Data & Privacy
 
 Reads: order status and estimated delivery. Collects: order number and email, used only for
 the lookup. Shows order details only after the lookup confirms the email belongs to the order.
 Stores nothing new.
 
+**Messy records:** org `Acme_Staging`; criterion: stale LastModifiedDate (>730d), empty
+`Order__c.Customer_Email__c`, duplicate legacy order keys, half-filled custom fields (the
+partial-copy staging sandbox in Environments — not the builder's scratch org).
+
 ## Environments
 
 | Stage | Org | Who approves moving on |
 |-------|-----|------------------------|
 | Build and test | developer sandbox | the builder |
-| Acceptance | staging sandbox | the support lead |
+| Acceptance | staging sandbox (`Acme_Staging`, partial copy of production accounts and orders) | the support lead |
 | Production | production | the support lead and the release owner, in writing |
 
 ## Behavioral Intent
@@ -83,6 +89,12 @@ graph TD
 | found | boolean | No | True only when the order exists and the email matches |
 | status | string | Yes | |
 | estimated_delivery | string | Yes | |
+
+## Salesforce Data Access
+
+| Action | Read objects | Read fields | Edit objects | Edit fields |
+|--------|--------------|-------------|--------------|-------------|
+| lookup_order | `Order__c` | `Order__c.Status__c`, `Order__c.Estimated_Delivery__c`, `Order__c.Customer_Email__c` | | |
 
 ## Agent Configuration
 

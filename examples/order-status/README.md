@@ -2,7 +2,7 @@
 
 One small agent followed through every phase. The store ("Acme Outdoor"), its customers and its orders are made up.
 
-**What is real here:** the spec, the Agent Script and the tests in this folder, and the output of the local gates (`doctor`, `spec`, `lint`, `coverage`, `status`), copied from actual runs with the home folder shortened to `~`. The `.agent` file compiles with no diagnostics on the Agent Script compiler 2.9.27.
+**What is real here:** the spec, the Agent Script and the tests in this folder, and the output of the local gates (`doctor`, `spec`, `lint`, `handoff`, `coverage`, `status`), copied from actual runs with the home folder shortened to `~`. The `.agent` file compiles with no diagnostics on the Agent Script compiler 2.9.27.
 
 **What is not a recording:** the conversation, and the steps that need an org. The two org gate blocks (`perms`, `active`) show output from runs against a real sandbox with the agent, class and org names replaced by this example's; each says so.
 
@@ -61,6 +61,8 @@ One job, one action, so one execution block and no subagents. The lookup is a Fl
 ```console
 $ $G lint OrderStatus.agent --state state.json
 PASS  lint  0 error(s), 0 warning(s)
+$ $G handoff spec.md OrderStatus.agent --state state.json
+PASS  handoff  0 error(s), 0 warning(s)
 ```
 
 What `lint` says when it is not happy, here after removing the `language:` block and leaving a note inside the `system` instructions:

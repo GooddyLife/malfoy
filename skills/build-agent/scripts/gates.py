@@ -5,11 +5,21 @@
     gates.py recon [REPO] [--no-orgs]        repo profile as JSON (read-only)
     gates.py spec SPEC.md [--final]          Agent Spec is complete
     gates.py lint FILE.agent [--final]       pitfalls the compiler does not report
-    gates.py coverage SPEC.md TESTS.yaml     every use case has a test
+    gates.py coverage SPEC.md TESTS.yaml [-o ORG] [--final] [--agent FILE.agent]
+                                             use cases, OOS and security tags; with -o, messy rows
+    gates.py handoff SPEC.md FILE.agent [--tests TESTS.yaml] [--results RESULTS.json]
+                                             escalation path, trace expectations, org run output
     gates.py perms FILE.agent -o ORG         the agent user can reach the action targets
+    gates.py perms FILE.agent -o ORG [--spec SPEC.md] [--tests TESTS.yaml]
+                                             optional object/field and record visibility (UserRecordAccess)
     gates.py active AGENT -o ORG [--version N]   which version is active, from the org;
                                              with --state, a pass is logged in releases.json
+    gates.py testrun TESTS.yaml -o ORG       record a passing agent test run in the state file
+                                             (--result-json from sf agent test run, or --pass)
+    gates.py observe SPEC.md -o ORG            compare live sessions to the Success Metric
+                                             (--input JSON when MessagingSession is unavailable)
     gates.py status STATE.json [--require a,b]   what passed, what failed, what went stale
+                                             (-o ORG for platform/API re-test hints on SHIPPED)
 
 Exit code: 0 pass, 1 fail, 2 could not run. With --state FILE a gate records its
 result and a hash of its input files, so `status` can tell "passed" from "passed
@@ -27,7 +37,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager, suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REQUIRED_SKILLS = ["agentforce-generate", "agentforce-persona-generate", "agentforce-test"]
@@ -49,10 +59,51 @@ PLACEHOLDERS = [
 ]
 UNFINISHED = re.compile(r"\b(TODO|FIXME|NEEDS STUB|NEEDS CREATION|PLACEHOLDER)\b")
 UC = re.compile(r"\bUC-\d+\b")
+HANDOFF_MODE = re.compile(r"\*\*handoff\s+mode:\*\*\s*support-channels-only", re.I)
+MESSY_SOURCE = re.compile(
+    r"\*\*(?:messy\s+records|realistic\s+test\s+data):\*\*", re.I)
+MESSY_STRUCTURED = re.compile(
+    r"\*\*(?:messy\s+records|realistic\s+test\s+data):\*\*\s*org\s+`([^`]+)`\s*;\s*criterion:\s*(.+)",
+    re.I)
+CRITERION_STALE = re.compile(r"stale\s+(LastModifiedDate|CreatedDate)(?:\s*\(>(\d+)d\))?", re.I)
+CRITERION_EMPTY = re.compile(r"empty\s+`([^`]+)`", re.I)
+SOBJECT_NAME = re.compile(r"^[A-Za-z_][\w]*(?:__c)?$")
+FIELD_TOKEN = re.compile(r"^[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)?$")
+STALE_DEFAULT_DAYS = 365
+TRANSFER_PROMISE = re.compile(
+    r"\b(?:transfer(?:s|ring)?(?:\s+(?:to|the|right\s+away))?|(?:goes|route[ds]?|connect(?:s|ed)?)\s+to\s+"
+    r"(?:a\s+)?(?:person|human|agent|queue)|live\s+(?:agent|handoff)|"
+    r"hand\s+off\s+to\s+(?:a\s+)?(?:person|queue))\b", re.I)
+TRANSFER_DENIAL = re.compile(
+    r"\b(?:no|not|never|without)\s+(?:promis(?:e|ing)\s+)?(?:a\s+)?(?:live\s+)?transfer|"
+    r"cannot\s+(?:make|perform)|does\s+not\s+transfer", re.I)
+ESCALATE_IN_AGENT = re.compile(r"@utils\.escalate\b")
+ESCALATION_TARGET = re.compile(
+    r"\*\*\s*Escalation target:\s*\*\*\s*(.+?)(?:\s*$|\*\*)", re.I | re.M)
+INFORMATIONAL_HANDOFF = re.compile(
+    r"(?i)\b(?:without\s+promis(?:e|ing)|say\s+how\s+to\s+reach|"
+    r"no\s+live\s+transfer|support\s+(?:phone|email|channel)|only\s+(?:name|point\s+to))",
+)
+OOS_TAG = re.compile(r"\bOOS-\d{2,}\b")
+SECURITY_TAG = re.compile(r"\b(?:security|prompt-injection)\b", re.I)
+ESCALATE_ACTION_NAME = re.compile(
+    r"(?i)(?:^|_)escalat|handoff|transfer_to|live_transfer")
+SALESFORCE_FIELD = re.compile(r"`([A-Za-z_][\w]*(?:__c)?)\.([A-Za-z_][\w]*)`")
+SALESFORCE_OBJECT = re.compile(r"`([A-Za-z_][\w]*(?:__c)?)`")
 TOP_BLOCK = re.compile(r"^([A-Za-z_]\w*)(?:\s+[\w.]+)?\s*:")
 LITERAL_BLOCK = re.compile(r"^(\s*)[\w.\-]+\s*:\s*\|[+-]?\d*\s*$")
 SF_TIMEOUT = int(os.environ.get("MALFOY_SF_TIMEOUT", "120"))  # seconds per sf call
-RECORD_ID = re.compile(r"""["'](0[0-9A-Za-z]{14}(?:[0-9A-Za-z]{3})?)["']""")
+STATE_META = frozenset({"test_run"})  # not gates; do not list in `status` as PASS/FAIL
+RECORD_ID = re.compile(r"""["']([a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?)["']""")
+# Bundled GA dates for seasonal Salesforce releases (calendar is deterministic; patch level is not).
+PLATFORM_RELEASES = [
+    ("Winter '24", "2023-10-13"), ("Spring '24", "2024-02-26"), ("Summer '24", "2024-06-10"),
+    ("Winter '25", "2024-10-14"), ("Spring '25", "2025-02-25"), ("Summer '25", "2025-06-17"),
+    ("Winter '26", "2025-10-14"), ("Spring '26", "2026-02-24"), ("Summer '26", "2026-06-16"),
+]
+SUCCESS_PCT = re.compile(
+    r"(\d+)\s*%.*?without\s+(?:a\s+)?transfer", re.I | re.S)
+SUCCESS_WINDOW = re.compile(r"(?:first|over\s+the\s+first)\s+(\d+)\s+days?", re.I)
 
 
 class CannotRun(Exception):
@@ -181,6 +232,202 @@ def git_head(folder: Path, files: list[str]) -> tuple[str | None, bool]:
     return head.stdout.strip(), bool(run("status", "--porcelain", "--", *files).stdout.strip())
 
 
+def platform_release_on(day: datetime) -> tuple[str, str]:
+    """Latest bundled seasonal release whose GA date is on or before `day` (UTC)."""
+    stamp = day.date().isoformat()
+    name, ga = PLATFORM_RELEASES[0]
+    for candidate, date in PLATFORM_RELEASES:
+        if date <= stamp:
+            name, ga = candidate, date
+    return name, ga
+
+
+def newer_platform_releases(iso_timestamp: str) -> list[tuple[str, str]]:
+    day = iso_timestamp[:10]
+    return [(name, ga) for name, ga in PLATFORM_RELEASES if ga > day]
+
+
+def org_api_version(org: str) -> str | None:
+    rows = soql(org, "SELECT ApiVersion FROM Organization LIMIT 1")
+    return str(rows[0]["ApiVersion"]) if rows else None
+
+
+def record_test_run(state: str, org: str, tests_path: str, ok: bool,
+                    api_version: str | None = None, platform: str | None = None):
+    path = Path(state)
+    if platform is None:
+        platform, _ = platform_release_on(datetime.now(timezone.utc))
+    with locked(path):
+        data = json_of(path)
+        data["test_run"] = {
+            "ok": ok, "at": now(), "org": org,
+            "org_api_version": api_version,
+            "platform_release": platform,
+            "inputs": {relative_to(tests_path, path.parent): digest(tests_path)},
+        }
+        write_json(path, data)
+
+
+def retest_reasons(state: Path, org: str | None) -> list[tuple[str, str, str]]:
+    """(verdict, code, message) when a SHIPPED agent may need its suite re-run."""
+    data = json_of(state)
+    run = data.get("test_run")
+    log = state.with_name("releases.json")
+    with locked(log):
+        releases = json_of(log).get("releases", [])
+    latest = {r["org"]: r for r in releases}
+    reasons: list[tuple[str, str, str]] = []
+    targets = [org] if org else sorted(latest)
+    for target in targets:
+        if target not in latest:
+            continue
+        if not run or not run.get("ok"):
+            reasons.append(("RETEST", "T1",
+                            f"{target}: no passing test run in state — rerun agent tests "
+                            "and record with `testrun`"))
+            continue
+        if run.get("org") and run["org"] != target:
+            continue
+        for name, ga in newer_platform_releases(run["at"]):
+            reasons.append(("RETEST", "T2",
+                            f"{target}: last passing test {run['at'][:10]} predates "
+                            f"{name} GA ({ga}); rerun the suite on this org"))
+        if org:
+            live = org_api_version(org)
+            recorded = run.get("org_api_version")
+            if live and recorded and live != recorded:
+                reasons.append(("RETEST", "T3",
+                                f"{target}: test run recorded API {recorded}; org is "
+                                f"now {live}; rerun the suite"))
+    return reasons
+
+
+def parse_success_metric(spec: str) -> tuple[int, int] | None:
+    _, body = sections(spec).get("success metric", (0, []))
+    text = "\n".join(body).strip()
+    if not text:
+        return None
+    pct = SUCCESS_PCT.search(text)
+    window = SUCCESS_WINDOW.search(text)
+    if not pct or not window:
+        return None
+    return int(pct.group(1)), int(window.group(1))
+
+
+def activation_time(state: Path, org: str) -> datetime | None:
+    log = state.with_name("releases.json")
+    with locked(log):
+        releases = json_of(log).get("releases", [])
+    for entry in reversed(releases):
+        if entry.get("org") == org and entry.get("at"):
+            return datetime.fromisoformat(entry["at"])
+    return None
+
+
+def session_transfer_counts(org: str, since_iso: str) -> tuple[int, int, str] | None:
+    """(total sessions, sessions without transfer proxy, data source note), or None if SOQL fails."""
+    since = since_iso.replace("+00:00", "Z")
+    try:
+        total_rows = soql(org, "SELECT COUNT() FROM MessagingSession "
+                              f"WHERE CreatedDate >= {since} "
+                              "AND AgentType IN ('Bot', 'Agent Bot')")
+        total = total_rows[0].get("expr0", 0) if total_rows else 0
+        escalated_rows = soql(org, "SELECT COUNT() FROM MessagingSession "
+                                    f"WHERE CreatedDate >= {since} "
+                                    "AND AgentType IN ('Bot', 'Agent Bot') "
+                                    "AND (EndedByType = 'BotToAgent' OR CaseId != null)")
+        escalated = escalated_rows[0].get("expr0", 0) if escalated_rows else 0
+    except CannotRun:
+        return None
+    note = ("MessagingSession counts (bot sessions; transfer ≈ BotToAgent end or CaseId set). "
+            "This is a SOQL proxy — not Agentforce Session Tracing in Data Cloud.")
+    return total, max(total - escalated, 0), note
+
+
+def gate_testrun(tests_path: str, org: str, result_json: str | None, passed: bool) -> Gate:
+    gate = Gate("testrun")
+    ok = False
+    if result_json:
+        try:
+            payload = json.loads(Path(result_json).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            raise CannotRun(f"cannot read test result JSON: {exc}") from exc
+        ok = bool(payload.get("success", payload.get("passed", False)))
+        if not ok:
+            gate.error("T4", "agent test result JSON does not report success", result_json)
+    elif passed:
+        ok = True
+    else:
+        gate.error("T4", "pass `--pass` or a successful `--result-json` from `sf agent test run`")
+    if ok:
+        version = org_api_version(org)
+        platform, _ = platform_release_on(datetime.now(timezone.utc))
+        gate.note(f"org API {version or 'unknown'}; bundled platform release {platform}")
+    gate.tests_ok = ok
+    return gate
+
+
+def gate_observe(spec_path: str, org: str, state: str | None, input_path: str | None) -> Gate:
+    gate = Gate("observe")
+    metric = parse_success_metric(text_of(spec_path))
+    if metric is None:
+        gate.warn("M1", "could not parse `## Success Metric` "
+                        "(expected e.g. `70% ... without transfer` and `first 30 days`)")
+        return gate
+    target_pct, window_days = metric
+    if not state:
+        gate.warn("M5", "pass `--state` so the window can start from the release recorded "
+                        "in `releases.json`, or pass `--input` with manual counts")
+        return gate
+    started = activation_time(Path(state), org)
+    if started is None:
+        gate.warn("M5", f"no release for org `{org}` in releases.json — cannot anchor the "
+                        f"{window_days}-day window")
+        return gate
+    end = started + timedelta(days=window_days)
+    now_utc = datetime.now(timezone.utc)
+    if now_utc < started:
+        gate.note(f"measurement window has not started (release {started.date().isoformat()})")
+        return gate
+    since = min(now_utc, end)
+    if now_utc < end:
+        gate.note(f"day {(now_utc - started).days + 1} of {window_days} — provisional check only")
+
+    total = without = 0
+    source = ""
+    if input_path:
+        try:
+            manual = json.loads(Path(input_path).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            raise CannotRun(f"cannot read --input: {exc}") from exc
+        total = int(manual["total_sessions"])
+        without = int(manual.get("sessions_without_transfer",
+                                 manual.get("without_transfer", 0)))
+        source = manual.get("source", "JSON file passed to --input")
+        gate.note(f"using documented input: {source}")
+    else:
+        counts = session_transfer_counts(org, started.isoformat(timespec="seconds"))
+        if counts is None:
+            gate.warn("M5", "MessagingSession is not queryable in this org (permissions or "
+                            "channel). Pass `--input` with "
+                            '`{"total_sessions": N, "sessions_without_transfer": M, '
+                            '"source": "..."}` from Tableau Next / observability exports')
+            return gate
+        total, without, source = counts
+        gate.note(source)
+
+    if total == 0:
+        gate.warn("M5", "no bot MessagingSession rows in the window — metric stays unmeasured")
+        return gate
+    actual = round(100 * without / total, 1)
+    gate.note(f"{without}/{total} sessions without transfer proxy ({actual}%) "
+              f"vs target {target_pct}%")
+    if actual < target_pct:
+        gate.warn("M4", f"actual {actual}% is below the {target_pct}% Success Metric "
+                        f"for the first {window_days} days (does not block release)")
+    return gate
+
+
 def record_release(state: str, org: str, version: int) -> str:
     """Append to releases.json, next to the state file, which inputs shipped as `version` to
     `org`: the files every recorded gate checked, hashed now, with the commit. Diffing the
@@ -251,6 +498,27 @@ def gate_spec(path: str, final: bool = False) -> Gate:
     elif pending:
         gate.note(f"{len(pending)} of {len(statuses)} action(s) still to build "
                   "(fine now, an error with --final)")
+    env_body = found.get("environments", (0, []))[1]
+    data_body = found.get("data & privacy", (0, []))[1]
+    messy_lines = [l for l in env_body + data_body if MESSY_SOURCE.search(l)]
+    if not messy_lines:
+        gate.error("S8", "declare where messy real records come from: a line "
+                         "`**Messy records:**` or `**Realistic test data:**` under "
+                         "`## Environments` or `## Data & Privacy`")
+    elif not any(MESSY_STRUCTURED.search(l) for l in messy_lines):
+        gate.error("S8", "structure messy records as "
+                         "`**Messy records:** org `ORG_ALIAS`; criterion: stale "
+                         "LastModifiedDate, empty `Object.Field`, …` "
+                         "(machine-checkable tokens after `criterion:`)")
+    _, actions_body = found.get("actions", (0, []))
+    has_actions = any(l.strip().startswith("### ") for l in actions_body)
+    read_obj, read_fld, write_obj, write_fld = spec_data_access_from_body(
+        sections(spec).get("salesforce data access", (0, []))[1])
+    data_access_empty = not (read_obj or read_fld or write_obj or write_fld)
+    if has_actions and data_access_empty:
+        (gate.error if final else gate.warn)(
+            "S9", "the spec has actions but `## Salesforce Data Access` is missing or "
+                  "empty: object and field permissions are unchecked until you fill the table")
     return gate
 
 
@@ -353,7 +621,252 @@ def tagged_ids(tests: str) -> set[str]:
     return tagged
 
 
-def gate_coverage(spec_path: str, tests_path: str) -> Gate:
+def messy_data_tests(tests: str) -> list[dict]:
+    """Test cases whose comment block immediately above includes `# messy-data`."""
+    cases: list[dict] = []
+    pending_messy = False
+    active: dict | None = None
+    for line in tests.splitlines():
+        text = line.strip()
+        if text.startswith("#") and "utterance" not in text:
+            pending_messy = "messy-data" in text.lower()
+        elif re.match(r"-\s*utterance\s*:", text):
+            if pending_messy:
+                active = {"recordIds": []}
+                cases.append(active)
+            else:
+                active = None
+            pending_messy = False
+        elif active is not None and re.match(r"recordIds?\s*:", text, re.I):
+            active["recordIds"].extend(RECORD_ID.findall(line))
+        elif text and not text.startswith("#") and not text.startswith("-"):
+            if active is not None and re.match(r"-\s", line) is None:
+                active = None
+    return cases
+
+
+def out_of_scope_items(spec: str) -> list[tuple[str, str]]:
+    """Numbered refuse items (`OOS-01`, …) from `## Out of Scope` prose or bullets."""
+    _, body = sections(spec).get("out of scope", (0, []))
+    if not body:
+        return []
+    items: list[str] = []
+    for line in body:
+        text = line.strip()
+        if not text or text.startswith("<!--"):
+            continue
+        bullet = re.match(r"^(?:[-*]|\d+[.)])\s+(.+)", text)
+        if bullet:
+            items.append(bullet.group(1).rstrip(".").strip())
+            continue
+    if not items:
+        prose = " ".join(l.strip() for l in body if l.strip() and not l.strip().startswith("<!--"))
+        first = re.split(r"\.\s+(?=[A-Z(])", prose, maxsplit=1)[0]
+        for part in re.split(r",\s*(?:and\s+)?|;\s*", first):
+            part = part.strip().rstrip(".")
+            if part and not part.lower().startswith("the agent"):
+                items.append(part)
+    return [(f"OOS-{i:02d}", text) for i, text in enumerate(items, 1)]
+
+
+def tagged_oos_ids(tests: str) -> set[str]:
+    """`# OOS-nn` on comment lines above a test case, same rules as `tagged_ids`."""
+    tagged, pending = set(), set()
+    for line in tests.splitlines():
+        text = line.strip()
+        if text.startswith("#") and "utterance" not in text:
+            pending |= set(OOS_TAG.findall(text))
+        elif re.match(r"-\s*utterance\s*:", text):
+            tagged |= pending
+            pending = set()
+        elif text:
+            pending = set()
+    return tagged
+
+
+def security_tagged_tests(tests: str) -> bool:
+    pending = False
+    for line in tests.splitlines():
+        text = line.strip()
+        if text.startswith("#") and "utterance" not in text:
+            pending = bool(SECURITY_TAG.search(text))
+        elif re.match(r"-\s*utterance\s*:", text):
+            if pending:
+                return True
+            pending = False
+        elif text:
+            pending = False
+    return False
+
+
+def customer_facing_agent(spec: str, agent: str | None) -> bool:
+    if agent:
+        if re.search(r"AgentforceServiceAgent|ServiceAgent", agent, re.I):
+            return True
+    _, cfg = sections(spec).get("agent configuration", (0, []))
+    return any("service" in l.lower() and "agent" in l.lower() for l in cfg)
+
+
+def test_cases_with_meta(tests: str) -> list[dict]:
+    """Each live test case: UC tags, optional OOS tags, and `expectedActions` if present."""
+    cases: list[dict] = []
+    pending_uc, pending_oos = set(), set()
+    active: dict | None = None
+    for line in tests.splitlines():
+        text = line.strip()
+        if text.startswith("#") and "utterance" not in text:
+            if active is not None:
+                active = None
+            pending_uc |= set(UC.findall(text))
+            pending_oos |= set(OOS_TAG.findall(text))
+        elif m := re.match(r"-\s*utterance\s*:\s*\"(.+)\"", text):
+            active = {"ucs": set(pending_uc) | set(UC.findall(line)),
+                      "oos": set(pending_oos), "expected_actions": [],
+                      "utterance": m.group(1)}
+            cases.append(active)
+            pending_uc, pending_oos = set(), set()
+        elif re.match(r"-\s*utterance\s*:", text):
+            active = {"ucs": set(pending_uc) | set(UC.findall(line)),
+                      "oos": set(pending_oos), "expected_actions": [], "utterance": ""}
+            cases.append(active)
+            pending_uc = pending_oos = set()
+        elif active is not None and re.match(r"expectedActions\s*:", text, re.I):
+            active["collecting_actions"] = True
+        elif active is not None and active.get("collecting_actions"):
+            item = re.match(r"-\s*(\S+)", text)
+            if item:
+                active["expected_actions"].append(item.group(1))
+            elif text and not text.startswith("#"):
+                active["collecting_actions"] = False
+        elif active is not None and text and not text.startswith("#"):
+            if not text.startswith("-") and not re.match(r"[\w]+:", text):
+                active = None
+    return cases
+
+
+def escalation_targets_in_agent(agent: str) -> set[str]:
+    refs = set()
+    for match in ESCALATE_IN_AGENT.findall(agent):
+        refs.add(match)
+    for flow in re.findall(r"flow://(\w+)", agent):
+        if ESCALATE_ACTION_NAME.search(flow) or re.search(
+                r"(?i)escalat|handoff|transfer", agent[agent.find(f"flow://{flow}") - 80:
+                                                   agent.find(f"flow://{flow}") + 80]):
+            refs.add(f"flow://{flow}")
+    for name in re.findall(r"^\s+(\w+)\s*:\s*@utils\.escalate", agent, re.M):
+        refs.add(name)
+    return refs
+
+
+def escalation_target_from_spec(handoff: str) -> str | None:
+    match = ESCALATION_TARGET.search(handoff)
+    if not match:
+        return None
+    raw = match.group(1).strip().strip("`").strip()
+    return raw or None
+
+
+def escalation_action_names(agent: str) -> set[str]:
+    names = {m.group(1) for m in re.finditer(r"^\s+(\w+)\s*:\s*@utils\.escalate", agent, re.M)}
+    names |= {"escalate", "escalate_to_human", "utils_escalate"}
+    return names
+
+
+def normalize_escalation_ref(text: str) -> str:
+    return re.sub(r"\s+", "", text.lower().strip("`"))
+
+
+def agent_target_matches_declared(agent: str, declared: str) -> bool:
+    declared_n = normalize_escalation_ref(declared)
+    if "@utils.escalate" in declared_n and ESCALATE_IN_AGENT.search(agent):
+        return True
+    flow = re.search(r"flow://(\w+)", declared, re.I)
+    if flow and f"flow://{flow.group(1)}" in agent:
+        return True
+    apex = re.search(r"apex://([\w$]+)", declared, re.I)
+    if apex and f"apex://{apex.group(1)}" in agent:
+        return True
+    bare = declared.strip("`").strip()
+    if re.fullmatch(r"[\w_]+", bare):
+        return bool(re.search(rf"^\s+{re.escape(bare)}\s*:", agent, re.M))
+    return declared_n in {normalize_escalation_ref(r) for r in escalation_targets_in_agent(agent)}
+
+
+def agent_instruction_text(agent: str) -> str:
+    lines = agent.splitlines()
+    chunks: list[str] = []
+    i = 0
+    while i < len(lines):
+        if re.search(r"\binstructions\s*:", lines[i]) and "|" in lines[i]:
+            if lines[i].rstrip().endswith("|"):
+                indent = len(lines[i]) - len(lines[i].lstrip()) + 4
+                i += 1
+                while i < len(lines) and (not lines[i].strip()
+                                          or len(lines[i]) - len(lines[i].lstrip()) >= indent):
+                    chunks.append(lines[i])
+                    i += 1
+                continue
+        if re.match(r"\s+instructions\s*:\s*->", lines[i]):
+            i += 1
+            if i < len(lines) and "|" in lines[i]:
+                match = LITERAL_BLOCK.match(lines[i])
+                if match:
+                    indent = len(match.group(1))
+                    i += 1
+                    while i < len(lines) and (not lines[i].strip()
+                                              or len(lines[i]) - len(lines[i].lstrip()) > indent):
+                        chunks.append(lines[i])
+                        i += 1
+                    continue
+        if re.match(r"\s+instructions\s*:\s*\|", lines[i]):
+            match = LITERAL_BLOCK.match(lines[i])
+            if match:
+                indent = len(match.group(1))
+                i += 1
+                while i < len(lines) and (not lines[i].strip()
+                                        or len(lines[i]) - len(lines[i].lstrip()) > indent):
+                    chunks.append(lines[i])
+                    i += 1
+                continue
+        i += 1
+    return "\n".join(chunks)
+
+
+def test_expects_escalation(case: dict, agent: str) -> bool:
+    actions = {a.lower() for a in case.get("expected_actions", [])}
+    names = {n.lower() for n in escalation_action_names(agent)}
+    if actions & names:
+        return True
+    return any(ESCALATE_ACTION_NAME.search(a) for a in actions)
+
+
+def parse_agent_test_results(path: str) -> list[dict]:
+    """Normalise a few JSON shapes from `sf agent test` / Testing Center exports."""
+    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    rows: list[dict] = []
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        for key in ("testCases", "testCaseResults", "results", "cases"):
+            if isinstance(data.get(key), list):
+                rows = data[key]
+                break
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        actions = row.get("actionsExecuted") or row.get("actionsRan") or row.get(
+            "expectedActions") or row.get("actualActions") or []
+        if isinstance(actions, str):
+            actions = [actions]
+        out.append({"actions": actions,
+                    "utterance": row.get("utterance") or row.get("input") or "",
+                    "passed": row.get("passed", row.get("status") == "passed")})
+    return out
+
+
+def gate_coverage(spec_path: str, tests_path: str, org: str | None = None,
+                  final: bool = False, agent_path: str | None = None) -> Gate:
     gate, tests = Gate("coverage"), text_of(tests_path)
     wanted, tested = set(use_case_ids(text_of(spec_path))), tagged_ids(tests)
     if not wanted:
@@ -370,10 +883,382 @@ def gate_coverage(spec_path: str, tests_path: str) -> Gate:
     if outcomes < cases:
         gate.warn("C5", f"{cases - outcomes} of {cases} test case(s) have no "
                         "`expectedOutcome`", tests_path)
+    spec_text = text_of(spec_path)
+    env = sections(spec_text).get("environments", (0, []))[1]
+    data = sections(spec_text).get("data & privacy", (0, []))[1]
+    if any(MESSY_SOURCE.search(l) for l in env + data):
+        messy = messy_data_tests(tests)
+        if not messy:
+            gate.error("C6", "the spec names a messy-record source but no test case "
+                             "is tagged `# messy-data` on the line above `- utterance:`",
+                       tests_path)
+        elif not any(m.get("recordIds") for m in messy):
+            msg = (f"{len(messy)} `# messy-data` test(s) have no `recordId` or `recordIds`: "
+                   "name the sandbox record(s) the case runs against")
+            (gate.error if final else gate.warn)("C7", msg, tests_path)
+        decl = messy_declaration(spec_text)
+        if org and decl:
+            alias, criteria = decl
+            if not org_matches_declared(org, alias):
+                gate.error("C8", f"tests run against org `{org}` but the spec declares messy "
+                                 f"records in `{alias}`", tests_path)
+            sobject = messy_default_sobject(spec_path, criteria)
+            if not sobject:
+                gate.error("C9", "cannot resolve an object for messy-record checks: add "
+                                 r"`empty `Object.Field`` in the criterion or rows in "
+                                 "`## Salesforce Data Access`", spec_path)
+            elif not criteria:
+                gate.warn("C10", "messy-record criterion has no `stale …` or `empty …` "
+                                 "tokens; the gate cannot verify messiness in the org", spec_path)
+            else:
+                for case in messy:
+                    for record_id in case.get("recordIds", []):
+                        for reason in check_messy_record(org, record_id, criteria, sobject):
+                            gate.error("C11", f"`{record_id}`: {reason}", tests_path)
+    refuse = out_of_scope_items(spec_text)
+    if refuse:
+        covered = tagged_oos_ids(tests)
+        for oos_id, label in refuse:
+            if oos_id not in covered:
+                short = label if len(label) <= 60 else label[:57] + "..."
+                gate.error("C12", f"refuse item `{oos_id}` ({short}) has no test. "
+                                 f"Tag `# {oos_id}` above a `- utterance:`",
+                           tests_path)
+        for case in test_cases_with_meta(tests):
+            for oos_id in case.get("oos", ()):
+                if oos_id not in {oid for oid, _ in refuse}:
+                    gate.warn("C14", f"`{oos_id}` is tagged on a test but is not in "
+                                     "`## Out of Scope`", tests_path)
+    agent_text = text_of(agent_path) if agent_path else None
+    if customer_facing_agent(spec_text, agent_text):
+        if not security_tagged_tests(tests):
+            gate.error("C13", "customer-facing agent needs at least one live test tagged "
+                             "`# security` or `# prompt-injection` above `- utterance:`",
+                       tests_path)
+    return gate
+
+
+# ---------------------------------------------------------------- handoff
+
+def handoff_section_body(spec: str) -> str:
+    return "\n".join(sections(spec).get("human handoff", (0, []))[1])
+
+
+def handoff_use_case_lines(spec: str) -> list[str]:
+    _, body = sections(spec).get("use cases", (0, []))
+    return [line for line in body if UC.search(line)
+            and re.search(r"\|\s*handoff\s*\|", line, re.I)]
+
+
+def handoff_must_column(row: str) -> str:
+    parts = [p.strip() for p in row.split("|")]
+    return parts[4] if len(parts) >= 5 else row
+
+
+def handoff_uc_requires_live(row: str) -> bool:
+    if not re.search(r"\|\s*handoff\s*\|", row, re.I):
+        return False
+    must = handoff_must_column(row)
+    if INFORMATIONAL_HANDOFF.search(must) or TRANSFER_DENIAL.search(must):
+        return False
+    return promises_live_transfer(must) or promises_live_transfer(row)
+
+
+def live_handoff_use_case_lines(spec: str) -> list[str]:
+    return [row for row in handoff_use_case_lines(spec) if handoff_uc_requires_live(row)]
+
+
+def handoff_uc_ids(spec: str) -> list[str]:
+    return [UC.search(row).group(0) for row in live_handoff_use_case_lines(spec) if UC.search(row)]
+
+
+def promises_live_transfer(text: str) -> bool:
+    flat = re.sub(r"\s+", " ", HANDOFF_MODE.sub("", text))
+    if TRANSFER_DENIAL.search(flat):
+        return False
+    return bool(TRANSFER_PROMISE.search(flat))
+
+
+def agent_can_escalate(agent: str) -> bool:
+    return bool(ESCALATE_IN_AGENT.search(agent))
+
+
+def agent_has_declared_escalation(agent: str, handoff: str) -> bool:
+    target = escalation_target_from_spec(handoff)
+    if target:
+        return agent_target_matches_declared(agent, target)
+    return bool(ESCALATE_IN_AGENT.search(agent))
+
+
+def gate_handoff(spec_path: str, agent_path: str,
+                 tests_path: str | None = None,
+                 results_path: str | None = None) -> Gate:
+    gate = Gate("handoff")
+    spec, agent = text_of(spec_path), text_of(agent_path)
+    handoff = handoff_section_body(spec)
+    offline = bool(HANDOFF_MODE.search(handoff))
+    declared = escalation_target_from_spec(handoff)
+    wired = agent_has_declared_escalation(agent, handoff)
+    live_rows = live_handoff_use_case_lines(spec)
+    all_handoff_rows = handoff_use_case_lines(spec)
+    spec_promises = promises_live_transfer(handoff) or bool(live_rows)
+    prompt = agent_instruction_text(agent)
+    prompt_promises = bool(prompt and promises_live_transfer(prompt))
+
+    if declared and not offline and not agent_target_matches_declared(agent, declared):
+        gate.error("H6", f"spec declares `**Escalation target:** {declared}` but the "
+                         f"`.agent` has no matching wire-up",
+                   agent_path)
+
+    if offline:
+        if ESCALATE_IN_AGENT.search(agent):
+            gate.error("H3", "spec declares `**Handoff mode:** support-channels-only` "
+                             "but the `.agent` still references `@utils.escalate`",
+                       agent_path)
+        if declared and declared != "@utils.escalate" and agent_target_matches_declared(
+                agent, declared):
+            gate.error("H3", "support-channels-only must not wire a live escalation "
+                             "target in the `.agent`",
+                       agent_path)
+        scope_promise = promises_live_transfer(handoff) or any(
+            handoff_uc_requires_live(row) for row in all_handoff_rows)
+        if scope_promise:
+            gate.error("H4", "support-channels-only handoff must not promise a live "
+                             "transfer in `## Human Handoff` or a `handoff` use case",
+                       spec_path)
+        if prompt and promises_live_transfer(prompt):
+            gate.error("H5", "support-channels-only but `.agent` instructions contain "
+                             "live-transfer phrasing (heuristic keyword scan)",
+                       agent_path)
+            gate.note("H5 uses a keyword heuristic on reasoning/system text, not a "
+                      "semantic read of the prompt")
+        elif prompt and TRANSFER_PROMISE.search(prompt):
+            gate.warn("H5", "`.agent` instructions may promise a transfer; review "
+                            "wording (heuristic)", agent_path)
+        gate.note("support-channels-only: no live escalation path is required")
+        return gate
+
+    needs_path = spec_promises or bool(live_rows) or prompt_promises
+    if needs_path and not wired:
+        gate.error("H1", "the spec or `.agent` instructions promise or test a live "
+                         "handoff but the `.agent` has no escalation path. Wire "
+                         f"`{declared or '@utils.escalate'}` or declare "
+                         "`**Handoff mode:** support-channels-only`", agent_path)
+    if spec_promises and not wired:
+        gate.error("H2", "`## Human Handoff` or a live `handoff` use case promises a "
+                         "transfer the agent cannot perform", spec_path)
+    if prompt_promises and not wired:
+        gate.error("H9", "`.agent` instructions promise a live transfer (reasoning or "
+                         "system text) but no escalation target is wired",
+                   agent_path)
+
+    if tests_path:
+        tests = text_of(tests_path)
+        live_ucs = set(handoff_uc_ids(spec))
+        if live_ucs:
+            cases = test_cases_with_meta(tests)
+            covered = {uc for case in cases for uc in case["ucs"]}
+            for uc in sorted(live_ucs - covered):
+                gate.error("H7", f"live `handoff` use case `{uc}` has no test tagged "
+                                 "on `- utterance:`. The suite must expect escalation "
+                                 "in the trace", tests_path)
+            reported: set[str] = set()
+            for case in cases:
+                missing = sorted(case["ucs"] & live_ucs)
+                if not missing:
+                    continue
+                if test_expects_escalation(case, agent):
+                    continue
+                for uc in missing:
+                    if uc in reported:
+                        continue
+                    reported.add(uc)
+                    gate.error("H8", f"test for `{uc}` does not list an escalation "
+                                     "action in `expectedActions` (trace must show "
+                                     "the handoff ran)", tests_path)
+
+    if results_path:
+        try:
+            rows = parse_agent_test_results(results_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            gate.error("H10", f"could not read test results: {exc}", results_path)
+            rows = []
+        names = {n.lower() for n in escalation_action_names(agent)}
+        live_uc_set = set(handoff_uc_ids(spec))
+        handoff_utterances = [
+            case["utterance"].lower() for case in (
+                test_cases_with_meta(text_of(tests_path)) if tests_path else [])
+            if case.get("utterance") and case["ucs"] & live_uc_set]
+        for row in rows:
+            if row.get("passed") is False:
+                continue
+            utter = (row.get("utterance") or "").lower()
+            if handoff_utterances and not any(u in utter or utter in u for u in handoff_utterances):
+                continue
+            ran = {str(a).lower() for a in row.get("actions", [])}
+            escalated = bool(ran & names) or any(
+                ESCALATE_ACTION_NAME.search(str(a)) for a in row.get("actions", []))
+            if not escalated:
+                gate.error("H10", "org test result passed but the trace shows no "
+                                 "escalation action (heuristic name match)",
+                           results_path)
+            elif not ran:
+                gate.warn("H11", "result row has no action list; could not verify "
+                                 "escalation on the trace", results_path)
     return gate
 
 
 # ---------------------------------------------------------------- org gates
+
+def spec_data_access_from_body(body: list[str]) -> tuple[set[str], set[tuple[str, str]], set[str], set[tuple[str, str]]]:
+    read_obj, read_fld, write_obj, write_fld = set(), set(), set(), set()
+    for line in body:
+        if not line.strip().startswith("|") or line.count("|") < 5:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 5 or cells[0].lower() in ("action", "---", "----"):
+            continue
+        for token in SALESFORCE_OBJECT.findall(cells[1]):
+            read_obj.add(token)
+        for token in SALESFORCE_OBJECT.findall(cells[3] if len(cells) > 3 else ""):
+            write_obj.add(token)
+        for obj, fld in SALESFORCE_FIELD.findall(cells[2]):
+            read_fld.add((obj, f"{obj}.{fld}"))
+        if len(cells) > 4:
+            for obj, fld in SALESFORCE_FIELD.findall(cells[4]):
+                write_fld.add((obj, f"{obj}.{fld}"))
+    return read_obj, read_fld, write_obj, write_fld
+
+
+def spec_data_access(spec_path: str) -> tuple[set[str], set[tuple[str, str]], set[str], set[tuple[str, str]]]:
+    """Objects and fields the spec says actions read or write (## Salesforce Data Access table)."""
+    _, body = sections(text_of(spec_path)).get("salesforce data access", (0, []))
+    return spec_data_access_from_body(body)
+
+
+def messy_declaration(spec: str) -> tuple[str, list[dict]] | None:
+    """Declared sandbox alias and parsed machine-checkable criteria, or None."""
+    env = sections(spec).get("environments", (0, []))[1]
+    data = sections(spec).get("data & privacy", (0, []))[1]
+    for line in env + data:
+        match = MESSY_STRUCTURED.search(line)
+        if not match:
+            continue
+        org_alias, criterion_text = match.group(1).strip(), match.group(2).strip()
+        criteria: list[dict] = []
+        for part in re.split(r",\s*(?=(?:stale|empty)\s)", criterion_text):
+            part = part.strip().rstrip(".")
+            stale = CRITERION_STALE.match(part)
+            if stale:
+                days = int(stale.group(2)) if stale.group(2) else STALE_DEFAULT_DAYS
+                criteria.append({"kind": "stale", "field": stale.group(1), "days": days})
+                continue
+            empty = CRITERION_EMPTY.match(part)
+            if empty:
+                criteria.append({"kind": "empty", "field": empty.group(1).strip()})
+        return org_alias, criteria
+    return None
+
+
+def org_auth_target(org: str) -> dict | None:
+    """The org the `-o` flag points at: alias, username, connected."""
+    listing = sf("org", "list")
+    for group in ("nonScratchOrgs", "scratchOrgs"):
+        for row in listing.get(group, []):
+            if org in (row.get("alias"), row.get("username")):
+                return row
+    return None
+
+
+def org_matches_declared(org: str, declared_alias: str) -> bool:
+    if declared_alias.lower() == org.lower():
+        return True
+    try:
+        target = org_auth_target(org)
+    except CannotRun:
+        return False
+    if not target:
+        return False
+    return (target.get("alias") or "").lower() == declared_alias.lower()
+
+
+def messy_default_sobject(spec_path: str, criteria: list[dict]) -> str | None:
+    for item in criteria:
+        if item["kind"] == "empty" and "." in item["field"]:
+            obj = item["field"].split(".", 1)[0]
+            if SOBJECT_NAME.match(obj):
+                return obj
+    read_obj, *_ = spec_data_access(spec_path)
+    return next(iter(sorted(read_obj)), None) if read_obj else None
+
+
+def record_ids_in_tests(tests: str) -> list[str]:
+    ids: list[str] = []
+    for line in tests.splitlines():
+        if re.search(r"recordIds?\s*:", line, re.I):
+            ids.extend(RECORD_ID.findall(line))
+    return ids
+
+
+def parse_sf_datetime(raw: str) -> datetime:
+    """Salesforce timestamps use `+0000`; Python before 3.11 needs `+00:00` for fromisoformat."""
+    s = raw.strip().replace("Z", "+00:00")
+    match = re.match(r"^(.*)([+-])(\d{2})(\d{2})$", s)
+    if match:
+        s = f"{match.group(1)}{match.group(2)}{match.group(3)}:{match.group(4)}"
+    return datetime.fromisoformat(s)
+
+
+def check_messy_record(org: str, record_id: str, criteria: list[dict], sobject: str) -> list[str]:
+    """Reasons the row fails the declared criterion. Empty list means it passes."""
+    if not SOBJECT_NAME.match(sobject):
+        return [f"cannot check `{record_id}`: object `{sobject}` is not a valid API name"]
+    fields = {"Id", "LastModifiedDate", "CreatedDate"}
+    for item in criteria:
+        if item["kind"] == "stale":
+            fields.add(item["field"])
+        elif item["kind"] == "empty":
+            token = item["field"]
+            fld = token.split(".", 1)[-1]
+            if SOBJECT_NAME.match(fld) or FIELD_TOKEN.match(fld):
+                fields.add(fld)
+    query = f"SELECT {', '.join(sorted(fields))} FROM {sobject} WHERE Id = '{record_id}'"
+    rows = soql(org, query)
+    if not rows:
+        return [f"`{record_id}` is not in org `{org}` on `{sobject}`"]
+    row = rows[0]
+    reasons: list[str] = []
+    now = datetime.now(timezone.utc)
+    for item in criteria:
+        if item["kind"] == "stale":
+            raw = row.get(item["field"])
+            if not raw:
+                reasons.append(f"`{item['field']}` is empty")
+                continue
+            stamp = parse_sf_datetime(raw)
+            age = (now - stamp).days
+            if age < item["days"]:
+                reasons.append(f"`{item['field']}` is {age}d old, criterion needs >{item['days']}d")
+        elif item["kind"] == "empty":
+            fld = item["field"].split(".", 1)[-1]
+            val = row.get(fld)
+            if val not in (None, ""):
+                reasons.append(f"`{fld}` is filled (`{val}`), criterion expects empty")
+    if criteria and not reasons:
+        return []
+    if not criteria:
+        return ["no machine-checkable criterion to verify messiness"]
+    return reasons
+
+
+def check_record_visibility(org: str, user_id: str, record_ids: list[str]) -> dict[str, bool]:
+    """Map record Id -> HasReadAccess for the agent user."""
+    if not record_ids:
+        return {}
+    rows = soql(org, "SELECT RecordId, HasReadAccess FROM UserRecordAccess "
+                   f"WHERE UserId = '{user_id}' AND RecordId IN ({quoted(record_ids)})")
+    return {row["RecordId"]: bool(row.get("HasReadAccess")) for row in rows}
+
 
 def sf(*args: str) -> dict:
     exe = shutil.which("sf")
@@ -404,7 +1289,8 @@ def quoted(values) -> str:
                     for v in values)
 
 
-def gate_perms(path: str, org: str) -> Gate:
+def gate_perms(path: str, org: str, spec_path: str | None = None,
+               tests_path: str | None = None) -> Gate:
     gate, text = Gate("perms"), text_of(path)
     lines = text.splitlines()
     apex = sorted({re.split(r"[$.]", name)[0]
@@ -456,9 +1342,72 @@ def gate_perms(path: str, org: str) -> Gate:
                 gate.error("P7", f"`flow://{name}`: flow has no active version")
         if not any((row.get("PermissionSet") or {}).get("PermissionsRunFlow") for row in sets):
             gate.warn("P8", "none of the agent user's permission sets grants Run Flows")
-    gate.note(f"checked {len(apex)} Apex and {len(flows)} Flow target(s) against "
-              f"{len(set_ids)} permission set(s). Field and object permissions for what "
-              "the actions read or write are NOT checked here.")
+    checked_objects = checked_fields = 0
+    if spec_path:
+        read_obj, read_fld, write_obj, write_fld = spec_data_access(spec_path)
+        if read_obj or read_fld or write_obj or write_fld:
+            parents = quoted(set_ids)
+            if read_obj:
+                rows = {row["SobjectType"] for row in soql(
+                    org, "SELECT SobjectType FROM ObjectPermissions "
+                         f"WHERE ParentId IN ({parents}) AND PermissionsRead = true "
+                         f"AND SobjectType IN ({quoted(read_obj)})")}
+                for obj in sorted(read_obj - rows):
+                    gate.error("P9", f"the agent user cannot read object `{obj}` "
+                                     "(declared in `## Salesforce Data Access`)")
+                checked_objects += len(read_obj)
+            if write_obj:
+                rows = {row["SobjectType"] for row in soql(
+                    org, "SELECT SobjectType FROM ObjectPermissions "
+                         f"WHERE ParentId IN ({parents}) AND PermissionsEdit = true "
+                         f"AND SobjectType IN ({quoted(write_obj)})")}
+                for obj in sorted(write_obj - rows):
+                    gate.error("P10", f"the agent user cannot edit object `{obj}` "
+                                      "(declared in `## Salesforce Data Access`)")
+                checked_objects += len(write_obj)
+            if read_fld:
+                fields = sorted({f for _, f in read_fld})
+                granted = {row["Field"] for row in soql(
+                    org, "SELECT Field FROM FieldPermissions "
+                         f"WHERE ParentId IN ({parents}) AND PermissionsRead = true "
+                         f"AND Field IN ({quoted(fields)})")}
+                for _, field in sorted(read_fld):
+                    if field not in granted:
+                        gate.error("P11", f"the agent user cannot read field `{field}` "
+                                          "(declared in `## Salesforce Data Access`)")
+                checked_fields += len(read_fld)
+            if write_fld:
+                fields = sorted({f for _, f in write_fld})
+                granted = {row["Field"] for row in soql(
+                    org, "SELECT Field FROM FieldPermissions "
+                         f"WHERE ParentId IN ({parents}) AND PermissionsEdit = true "
+                         f"AND Field IN ({quoted(fields)})")}
+                for _, field in sorted(write_fld):
+                    if field not in granted:
+                        gate.error("P12", f"the agent user cannot edit field `{field}` "
+                                          "(declared in `## Salesforce Data Access`)")
+                checked_fields += len(write_fld)
+    record_ids = record_ids_in_tests(text_of(tests_path)) if tests_path else []
+    if record_ids:
+        visibility = check_record_visibility(org, person["Id"], record_ids)
+        for record_id in sorted(set(record_ids)):
+            if record_id not in visibility:
+                gate.error("P13", f"record `{record_id}` was not returned by UserRecordAccess "
+                                  "(missing or not shared to the agent user)")
+            elif not visibility[record_id]:
+                gate.error("P13", f"record `{record_id}` is not readable by the agent user "
+                                  "(OWD or sharing rules hide it even when field access exists)")
+    if checked_objects or checked_fields:
+        gate.note(f"checked {len(apex)} Apex and {len(flows)} Flow target(s), "
+                  f"{checked_objects} object(s) and {checked_fields} field(s) from the spec "
+                  f"against {len(set_ids)} permission set(s)")
+    else:
+        gate.note(f"checked {len(apex)} Apex and {len(flows)} Flow target(s) against "
+                  f"{len(set_ids)} permission set(s). Add `## Salesforce Data Access` to the "
+                  "spec to gate object and field reads/writes")
+    if record_ids:
+        gate.note(f"checked read access to {len(set(record_ids))} test record(s) via "
+                  "UserRecordAccess")
     return gate
 
 
@@ -492,7 +1441,7 @@ def skill_roots() -> list[Path]:
             home / ".claude/skills", home / ".agents/skills"]
 
 
-def gate_doctor() -> Gate:
+def gate_doctor(state: str | None = None, org: str | None = None) -> Gate:
     gate = Gate("doctor")
     if sys.version_info < (3, 9):
         gate.error("D1", f"Python 3.9+ needed, this is {sys.version.split()[0]}")
@@ -510,6 +1459,14 @@ def gate_doctor() -> Gate:
         else:
             gate.warn("D4", f"optional skill `{name}` is not installed")
     gate.note("skills looked up in: " + ", ".join(str(r) for r in roots))
+    platform, ga = platform_release_on(datetime.now(timezone.utc))
+    gate.note(f"bundled latest platform release: {platform} GA {ga}")
+    if state:
+        for verdict, code, msg in retest_reasons(Path(state), org):
+            gate.warn(code, msg)
+    elif org:
+        gate.warn("T1", "pass `--state` with `-o` to check whether a SHIPPED agent needs "
+                        "its test suite re-run after a platform or API change")
     return gate
 
 
@@ -559,12 +1516,12 @@ def recon(repo: str, orgs: bool = True) -> dict:
     return profile
 
 
-def status(state: str, require: list[str]) -> int:
+def status(state: str, require: list[str], org: str | None = None) -> int:
     path = Path(state)
     with locked(path):
         data = json_of(path)
     ready = True
-    for gate in require + [g for g in data if g not in require]:
+    for gate in require + [g for g in data if g not in require and g not in STATE_META]:
         entry = data.get(gate)
         if entry is None:
             verdict = "MISSING"
@@ -579,10 +1536,12 @@ def status(state: str, require: list[str]) -> int:
     with locked(log):
         releases = json_of(log).get("releases", [])
     latest = {release["org"]: release for release in releases}  # the log is in time order
-    for org, release in latest.items():  # informational: drift is not a failed gate
+    for ship_org, release in latest.items():  # informational: drift is not a failed gate
         changed = changed_inputs(path.parent, release["inputs"])
-        print(f"{'DRIFT' if changed else 'SHIPPED':8}{org:10}v{release['version']} "
+        print(f"{'DRIFT' if changed else 'SHIPPED':8}{ship_org:10}v{release['version']} "
               f"{release['at']}" + (f"  changed since: {', '.join(changed)}" if changed else ""))
+    for verdict, code, msg in retest_reasons(path, org):
+        print(f"{verdict:8}{code:10}{msg}")
     print("READY: every required gate passed on the current files" if ready else
           "NOT READY: fix the gates above, then run them again")
     return 0 if ready else 1
@@ -594,23 +1553,42 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="gates.py", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="gate", required=True)
-    sub.add_parser("doctor")
+    p = sub.add_parser("doctor")
+    p.add_argument("--state", help="state file with test_run evidence and releases.json")
+    p.add_argument("-o", "--org", help="org alias to check platform/API re-test hints")
     p = sub.add_parser("recon"); p.add_argument("repo", nargs="?", default=".")
     p.add_argument("--no-orgs", action="store_true")
     p = sub.add_parser("spec"); p.add_argument("spec"); p.add_argument("--final", action="store_true")
     p = sub.add_parser("lint"); p.add_argument("agent"); p.add_argument("--final", action="store_true")
     p = sub.add_parser("coverage"); p.add_argument("spec"); p.add_argument("tests")
+    p.add_argument("-o", "--org", help="org where tests run: messy rows must exist there")
+    p.add_argument("--final", action="store_true")
+    p.add_argument("--agent", help="`.agent` file; needed for customer-facing security rule C13")
+    p = sub.add_parser("handoff"); p.add_argument("spec"); p.add_argument("agent")
+    p.add_argument("--tests", help="tests.yaml; require escalation in expectedActions for live handoff")
+    p.add_argument("--results", help="JSON org test results; verify escalation ran on the trace")
     p = sub.add_parser("perms"); p.add_argument("agent"); p.add_argument("-o", "--org", required=True)
+    p.add_argument("--spec", help="spec with optional ## Salesforce Data Access for object/field checks")
+    p.add_argument("--tests", help="tests.yaml: UserRecordAccess on recordId / recordIds rows")
     p = sub.add_parser("active"); p.add_argument("agent"); p.add_argument("-o", "--org", required=True)
     p.add_argument("--version", type=int)
+    p = sub.add_parser("testrun"); p.add_argument("tests")
+    p.add_argument("-o", "--org", required=True)
+    p.add_argument("--result-json", help="JSON from `sf agent test run --result-format json`")
+    p.add_argument("--pass", dest="record_pass", action="store_true",
+                   help="record success without reading JSON")
+    p = sub.add_parser("observe"); p.add_argument("spec")
+    p.add_argument("-o", "--org", required=True)
+    p.add_argument("--input", help="manual counts JSON when session SOQL is unavailable")
     p = sub.add_parser("status"); p.add_argument("state")
     p.add_argument("--require", default="spec,lint,coverage")
-    for name in ("spec", "lint", "coverage", "perms", "active"):
+    p.add_argument("-o", "--org", help="limit platform/API re-test hints to one org")
+    for name in ("spec", "lint", "coverage", "handoff", "perms", "active", "testrun", "observe"):
         sub.choices[name].add_argument("--state", help="JSON file to record the result in")
     a = parser.parse_args(argv)
     try:
         if a.gate == "doctor":
-            return gate_doctor().finish()
+            return gate_doctor(getattr(a, "state", None), getattr(a, "org", None)).finish()
         if a.gate == "recon":
             print(json.dumps(recon(a.repo, not a.no_orgs), indent=2))
             return 0
@@ -619,16 +1597,32 @@ def main(argv: list[str] | None = None) -> int:
         if a.gate == "lint":
             return gate_lint(a.agent, a.final).finish(a.state, [a.agent])
         if a.gate == "coverage":
-            return gate_coverage(a.spec, a.tests).finish(a.state, [a.spec, a.tests])
+            inputs = [a.spec, a.tests] + ([a.agent] if a.agent else [])
+            return gate_coverage(a.spec, a.tests, a.org, a.final, a.agent).finish(a.state, inputs)
+        if a.gate == "handoff":
+            inputs = [a.spec, a.agent] + ([a.tests] if a.tests else [])
+            if a.results:
+                inputs.append(a.results)
+            return gate_handoff(a.spec, a.agent, a.tests, a.results).finish(a.state, inputs)
         if a.gate == "perms":
-            return gate_perms(a.agent, a.org).finish(a.state, [a.agent])
+            inputs = [a.agent] + ([a.spec] if a.spec else []) + ([a.tests] if a.tests else [])
+            return gate_perms(a.agent, a.org, a.spec, a.tests).finish(a.state, inputs)
         if a.gate == "active":
             gate = gate_active(a.agent, a.org, a.version)
             code = gate.finish(a.state, [])
             if code == 0 and a.state:
                 print(f"NOTE  active  {record_release(a.state, a.org, gate.live)}")
             return code
-        return status(a.state, [g for g in a.require.split(",") if g])
+        if a.gate == "testrun":
+            gate = gate_testrun(a.tests, a.org, a.result_json, a.record_pass)
+            code = gate.finish(a.state, [a.tests])
+            if code == 0 and a.state and getattr(gate, "tests_ok", False):
+                version = org_api_version(a.org)
+                record_test_run(a.state, a.org, a.tests, True, version)
+            return code
+        if a.gate == "observe":
+            return gate_observe(a.spec, a.org, a.state, a.input).finish(a.state, [a.spec])
+        return status(a.state, [g for g in a.require.split(",") if g], getattr(a, "org", None))
     except CannotRun as exc:
         print(f"CANNOT RUN  {a.gate}  {exc}", file=sys.stderr)
         return 2

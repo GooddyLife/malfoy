@@ -20,9 +20,9 @@ The first six are sections this skill adds. The rest come from the `agentforce-g
 | Use Cases | What will people actually ask, and what must happen each time? | A table with an ID per row (`UC-01`), a type, the situation, the required behaviour |
 | Success Metric | How will anyone know it worked, in a number, by when? | "70% of order-status chats end without a transfer, first 30 days." |
 | Out of Scope | What will it be asked that it must not do? | A short list. "Refunds. Address changes." |
-| Human Handoff | When does a person take over, and where does the conversation go? | The trigger and the queue. "On request, or after two failed lookups." |
-| Data & Privacy | What does it read, write and collect? What may it show, and only after what check? | Named fields and the check that unlocks them |
-| Environments | Which orgs, in what order, and who approves each move? | A table: stage, org, approver |
+| Human Handoff | When does a person take over, and where does the conversation go? | The trigger and the queue. Add `**Escalation target:**` when it is not `@utils.escalate`. For channels only, `**Handoff mode:** support-channels-only` and no live-transfer wording in use cases |
+| Data & Privacy | What does it read, write and collect? What may it show, and only after what check? | Named fields and the check that unlocks them. Add structured `**Messy records:** org \`ALIAS\`; criterion: …` for the sandbox copy used in tests |
+| Environments | Which orgs, in what order, and who approves each move? | A table: stage, org, approver. Name a partial- or full-copy sandbox where realistic records live |
 
 ### Use case types
 
@@ -49,6 +49,9 @@ Ask these when the request did not cover them. They are the ones that surface in
 5. What happens to a conversation that the user abandons halfway?
 6. Is there anything it may say to a verified person that it must not say to an anonymous one?
 7. What is the rollback if the new version misbehaves in production?
+8. Where will tests run against messy real records (oldest accounts, duplicate keys, half-filled fields), not only clean sample rows?
+
+In Phase 2, add a `## Salesforce Data Access` table (one row per action) listing objects and fields the action reads or writes, in backticks. `perms --spec` checks the agent user's permission sets against it.
 
 ## Definition of ready
 

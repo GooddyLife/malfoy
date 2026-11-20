@@ -4,7 +4,7 @@ description: Guides building a Salesforce Agentforce agent end to end, from prod
 license: MIT
 metadata:
   author: GooddyLife
-  version: 0.2.0
+  version: 0.3.0
 ---
 
 # Build an Agentforce agent, end to end
@@ -34,12 +34,15 @@ If `${CLAUDE_SKILL_DIR}` shows up unresolved, the script is at `scripts/gates.py
 |------|--------|-------|
 | `doctor` | `sf` on PATH, upstream skills installed | nothing |
 | `recon [REPO]` | prints the repo profile as JSON: packages, existing agents, rule files to read, CI, orgs | a DX project |
-| `spec SPEC.md` | every section present and filled, no template placeholder left, use cases have IDs, at least one guardrail. `--final`: every action is `EXISTS` | the spec |
+| `spec SPEC.md` | every section present and filled, no template placeholder left, use cases have IDs, at least one guardrail, structured `**Messy records:**` (S8). `--final`: every action is `EXISTS`; non-empty `## Salesforce Data Access` when actions exist (S9) | the spec |
 | `lint FILE.agent` | pitfalls the compiler does not report (codes L1 to L7). `--final`: unfinished markers become errors | the `.agent` |
-| `coverage SPEC.md TESTS.yaml` | every `UC-nn` in the spec is tagged on a test case | spec and tests |
-| `perms FILE.agent -o ORG` | the agent user exists, is active, can reach every Apex target, every Flow target exists and is active | an authenticated org |
+| `coverage SPEC.md TESTS.yaml [-o ORG] [--final] [--agent FILE.agent]` | every `UC-nn` tagged; `# messy-data` when S8 applies (C6–C11 with `-o`); each refuse item `# OOS-nn` (C12); customer-facing needs `# security` or `# prompt-injection` (C13) | spec and tests; `-o` needs an org |
+| `handoff SPEC.md FILE.agent [--tests TESTS.yaml] [--results RESULTS.json]` | escalation path vs `**Escalation target:**` / `support-channels-only` (H1–H6); instruction heuristics (H5/H9); `--tests` / `--results` for trace proof (H7–H11) | spec and `.agent` |
+| `perms FILE.agent -o ORG [--spec SPEC.md] [--tests TESTS.yaml]` | Apex/Flow access; optional object/field table (`--spec`, P9–P12); `UserRecordAccess` on test record IDs (`--tests`, P13) | an authenticated org |
 | `active AGENT -o ORG` | which version is `Active`, read from the org. `--version N` to require one. With `--state`, a pass appends to `releases.json` which files shipped as that version, with the commit | an authenticated org |
-| `status STATE.json` | what passed, failed, never ran, or went `STALE` because its input changed. `--require a,b,c`. Also the last release per org: `SHIPPED`, or `DRIFT` with the files changed since | the state file |
+| `testrun TESTS.yaml -o ORG` | records a passing agent test run in the state file (`test_run`: time, org API version, bundled platform release, hash of `tests.yaml`). Use `--result-json` from `sf agent test run` or `--pass` after trace evidence. Rules T1–T4 | an authenticated org |
+| `observe SPEC.md -o ORG` | after go-live, compares the `## Success Metric` to live data. Warns on M4 when below target; never blocks release. Uses MessagingSession SOQL when it works, else `--input` JSON with documented counts from observability exports. Rules M1–M5 | an authenticated org and `--state` |
+| `status STATE.json` | what passed, failed, never ran, or went `STALE` because its input changed. `--require a,b,c`. Also the last release per org: `SHIPPED`, or `DRIFT` with the files changed since; `RETEST` lines (T1–T3) when the suite should run again after a seasonal release or org API change (`-o ORG`) | the state file |
 
 Exit code 0 is pass, 1 is fail, 2 means the gate could not run (say so; it is not a pass). When a gate fails, fix the cause and run it again. Do not argue with it, and do not move on with a `STALE` gate.
 
@@ -51,10 +54,10 @@ Exit code 0 is pass, 1 is fail, 2 means the gate could not run (say so; it is no
 | 1 | Discovery: the spec | `agentforce-generate` (spec template) | `spec`, then the user approves the spec |
 | 2 | Architecture | `agentforce-generate` | `spec` again |
 | 3 | Persona | `agentforce-persona-generate` | score at or above the agreed minimum |
-| 4 | Build | `agentforce-generate` | local compile clean, `lint`, `perms` |
+| 4 | Build | `agentforce-generate` | local compile clean, `lint`, `handoff`, `perms` |
 | 5 | Test | `agentforce-test` | `coverage`, every test passing on trace evidence |
-| 6 | Release | `agentforce-generate` | `status`, `spec --final`, `lint --final`, then `perms` and `active` per org |
-| 7 | Observe | `agentforce-observe`, `agentforce-d360-analyze` | optional |
+| 6 | Release | `agentforce-generate` | `status`, `spec --final`, `lint --final`, `handoff`, then `perms` and `active` per org |
+| 7 | Observe | `agentforce-observe`, `agentforce-d360-analyze` | `testrun` after Phase 5; `observe` once the Success Metric window has traffic; `status -o` for `RETEST` |
 
 Keep every artifact of one agent in `.malfoy/<AgentApiName>/`: `spec.md`, `tests.yaml`, `state.json`, `releases.json`. Unless the repo's rules say otherwise, suggest committing the folder with the agent: the commits in `releases.json` then show what changed in the spec between any two versions.
 
@@ -84,17 +87,17 @@ Invoke `agentforce-persona-generate`. Agree a minimum score with the user before
 
 ### Phase 4: build
 
-Read [references/platform-gotchas.md](references/platform-gotchas.md) before writing instructions. Invoke `agentforce-generate` ("Create an Agent"). Compile locally as that skill requires, then run `lint`. Deploy dependencies to the build org only as the repo's rules allow, then run `perms` against that org. A `perms` failure is a blocker: permission problems in agent actions are silent at runtime.
+Read [references/platform-gotchas.md](references/platform-gotchas.md) before writing instructions. Invoke `agentforce-generate` ("Create an Agent"). Compile locally as that skill requires, then run `lint` and `handoff`. Deploy dependencies to the build org only as the repo's rules allow, then run `perms` against that org (pass `--spec` once `## Salesforce Data Access` is filled in). A `perms` or `handoff` failure is a blocker: permission problems and broken handoff promises are silent at runtime.
 
 ### Phase 5: test
 
-Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). Run `coverage`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in tests: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name.
+Invoke `agentforce-test`. Write `tests.yaml` in Testing Center format: `# UC-nn`, `# OOS-nn` per refuse item, `# security` or `# prompt-injection` for customer-facing agents, and `# messy-data` with real `recordId` values when S8 applies. Run `coverage --agent` (and `coverage -o` + `perms --tests` on the build org before `--final`). Run `handoff --tests` and, after an org suite, `handoff --results`. Preview and Testing Center runs need trace evidence; use live actions when results matter. When the suite passes, run `testrun --state` for later `RETEST` hints on `status`.
 
 ### Phase 6: release
 
-Run `status --require spec,lint,coverage,perms`, then `spec --final` and `lint --final`. For each environment in the spec, in order:
+Run `status --require spec,lint,coverage,handoff,perms`, then `spec --final`, `lint --final` and `handoff` with `--tests` again (and `--results` when org output is available). For each environment in the spec, in order:
 
-1. Run `perms` against that org.
+1. Run `perms --spec --tests` against that org.
 2. Show the org, the agent and the version, and get approval as the repo's rules require (always for production).
 3. Before a production activation, note the version that is active now. That is the rollback.
 4. Publish and activate following "Deploy, Publish, and Activate" in `agentforce-generate`.
@@ -102,7 +105,13 @@ Run `status --require spec,lint,coverage,perms`, then `spec --final` and `lint -
 
 ### Phase 7: observe
 
-Once real sessions exist, offer `agentforce-observe` or `agentforce-d360-analyze`. Use `agentforce-hyperclassifier-configure` and `agentforce-offline-experimentation-run` only when asked; replaying real conversations through another model moves customer data, so confirm the data may leave the org first.
+This phase is mandatory after go-live, not optional prose.
+
+1. **Re-test when the platform moves.** On a schedule and before major changes, run `status STATE.json -o ORG`. Treat every `RETEST` line (T1–T3) as work: no recorded passing test, a bundled seasonal GA after the last run, or the org API version no longer matches what was recorded. Re-run the agent test suite and `testrun` with `--state`.
+2. **Success Metric.** Parse the window from `## Success Metric` (anchor: `releases.json` `at` for that org). Run `observe SPEC.md -o ORG --state STATE.json`. It warns on M4 when the rate is below target; it does not fail the release. If MessagingSession is not a faithful view (common for Agentforce Session Tracing in Data Cloud), export counts from observability and pass `--input` with `total_sessions`, `sessions_without_transfer`, and a `source` string you can cite.
+3. **Deep dives.** Offer `agentforce-observe` or `agentforce-d360-analyze` when the gates flag a problem or the user asks. Use `agentforce-hyperclassifier-configure` and `agentforce-offline-experimentation-run` only when asked; replaying real conversations through another model moves customer data, so confirm the data may leave the org first.
+
+`doctor --state STATE.json -o ORG` surfaces the same `RETEST` warnings as a pre-flight check.
 
 ## Examples
 
@@ -117,5 +126,7 @@ Once real sessions exist, offer `agentforce-observe` or `agentforce-d360-analyze
 - **`CANNOT RUN ... sf is not on PATH`:** the Salesforce CLI is missing or the shell cannot see it. Org gates cannot run; say so instead of skipping them.
 - **`doctor` reports D3:** a required upstream skill is not in the folders it looked in. Run `scripts/install-upstream.sh`, or set `MALFOY_SKILL_ROOTS` if the skills live somewhere else.
 - **`status` says `STALE`:** a file changed after its gate passed. Run that gate again.
+- **`status` or `doctor` says `RETEST`:** the agent is still `SHIPPED` but the recorded test run predates a newer bundled Salesforce GA and/or the org API version changed. Re-run tests and `testrun`.
+- **`observe` M5:** session data is not available through the SOQL proxy. Use `--input` with documented counts, or enable Agentforce Session Tracing and Tableau Next per `agentforce-observe`.
 - **`perms` P5:** the agent user has no access to an Apex class. Add the class to a permission set assigned to that user, deploy, run `perms` again.
 - **The org has no Testing Center:** run preview tests only, and write in the release notes that the batch suite did not run.

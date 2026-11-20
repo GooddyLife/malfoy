@@ -27,7 +27,8 @@ jobs:
         run: |
           python ../../skills/build-agent/scripts/gates.py spec spec.md
           python ../../skills/build-agent/scripts/gates.py lint OrderStatus.agent --final
-          python ../../skills/build-agent/scripts/gates.py coverage spec.md tests.yaml
+          python ../../skills/build-agent/scripts/gates.py handoff spec.md OrderStatus.agent --tests tests.yaml
+          python ../../skills/build-agent/scripts/gates.py coverage spec.md tests.yaml --agent OrderStatus.agent
 
   all-gates:  # the one required check; skipped would count as passing, so it always runs
     if: always()
