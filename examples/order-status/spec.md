@@ -31,6 +31,8 @@ the order.
 On request, at any point. Also after two lookups in a row that find nothing. The chat goes
 to the Customer Care queue with the conversation attached.
 
+**Escalation target:** `@utils.escalate`
+
 ## Data & Privacy
 
 Reads: order status and estimated delivery. Collects: order number and email, used only for

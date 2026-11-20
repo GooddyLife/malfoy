@@ -36,8 +36,8 @@ If `${CLAUDE_SKILL_DIR}` shows up unresolved, the script is at `scripts/gates.py
 | `recon [REPO]` | prints the repo profile as JSON: packages, existing agents, rule files to read, CI, orgs | a DX project |
 | `spec SPEC.md` | every section present and filled, no template placeholder left, use cases have IDs, at least one guardrail. `--final`: every action is `EXISTS` | the spec |
 | `lint FILE.agent` | pitfalls the compiler does not report (codes L1 to L7). `--final`: unfinished markers become errors | the `.agent` |
-| `coverage SPEC.md TESTS.yaml` | every `UC-nn` in the spec is tagged on a test case; when the spec names a messy-record source, at least one test is tagged `# messy-data` | spec and tests |
-| `handoff SPEC.md FILE.agent` | live handoff promises match `@utils.escalate`, or the spec declares `**Handoff mode:** support-channels-only` with no transfer promise | spec and `.agent` |
+| `coverage SPEC.md TESTS.yaml [--agent FILE.agent]` | every `UC-nn` is tagged on a test; messy-record source needs `# messy-data`; each refuse item needs `# OOS-nn`; customer-facing agents need `# security` or `# prompt-injection` | spec and tests (+ `.agent` for C9) |
+| `handoff SPEC.md FILE.agent [--tests TESTS.yaml] [--results RESULTS.json]` | live handoff matches `**Escalation target:**` (default `@utils.escalate`) in the `.agent`, including instruction text; informational `handoff` rows do not force escalation; with `--tests` / `--results`, traces must show the handoff action | spec and `.agent` (+ tests / org results) |
 | `perms FILE.agent -o ORG` | the agent user exists, is active, can reach every Apex target, every Flow target exists and is active. With `--spec`, checks `## Salesforce Data Access` object and field reads/writes | an authenticated org |
 | `active AGENT -o ORG` | which version is `Active`, read from the org. `--version N` to require one. With `--state`, a pass appends to `releases.json` which files shipped as that version, with the commit | an authenticated org |
 | `status STATE.json` | what passed, failed, never ran, or went `STALE` because its input changed. `--require a,b,c`. Also the last release per org: `SHIPPED`, or `DRIFT` with the files changed since | the state file |
@@ -89,11 +89,11 @@ Read [references/platform-gotchas.md](references/platform-gotchas.md) before wri
 
 ### Phase 5: test
 
-Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). When the spec names a messy-record source, tag at least one case with `# messy-data` and set `recordId` (or `recordIds`) to a real row from that sandbox. Run `coverage`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in utterances too: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name.
+Invoke `agentforce-test`. Write `tests.yaml` in its Testing Center format and tag each case with a comment naming the use case it covers (`# UC-03`). When the spec names a messy-record source, tag at least one case with `# messy-data` and set `recordId` (or `recordIds`) to a real row from that sandbox. Run `coverage` with `--agent` so refuse-item (`# OOS-nn`) and security tags are checked. Run `handoff` with `--tests` so live handoff cases require escalation in `expectedActions`. Run preview tests with traces, the Testing Center suite when the org has it, and the security mode for anything customer-facing; then `handoff --results` when you have JSON from the org run. A test passes on what the trace shows (the action ran, with the expected input), not on a reply that reads well. Use messy input in utterances too: typos, fragments, wrong formats. Judge anything that depends on an action's result with live actions: simulated actions invent the result. In `tests.yaml`, name actions by their definition name; see [references/platform-gotchas.md](references/platform-gotchas.md) for the topic name.
 
 ### Phase 6: release
 
-Run `status --require spec,lint,coverage,handoff,perms`, then `spec --final`, `lint --final` and `handoff` again. For each environment in the spec, in order:
+Run `status --require spec,lint,coverage,handoff,perms`, then `spec --final`, `lint --final` and `handoff` with `--tests` again (and `--results` when org output is available). For each environment in the spec, in order:
 
 1. Run `perms --spec` against that org.
 2. Show the org, the agent and the version, and get approval as the repo's rules require (always for production).

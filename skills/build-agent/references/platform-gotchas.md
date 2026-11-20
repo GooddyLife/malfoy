@@ -80,4 +80,8 @@ Builders often test on rows they just created. Production traffic hits the oldes
 
 ## A handoff promise without an action
 
-Instructions that say "transfer to support" or "I will connect you to an agent" with no `@utils.escalate` in the `.agent` file fail in production as a confident lie. Either wire `@utils.escalate`, or declare `**Handoff mode:** support-channels-only` in `## Human Handoff` and word the use cases so they only name phone, email or portal links. `gates.py handoff` checks the pairing before deploy.
+Instructions that say "transfer to support" or "I will connect you to an agent" with no escalation wired fail in production as a confident lie. Wire the target named in `**Escalation target:**` (default `@utils.escalate`, or a Flow/Apex action), or declare `**Handoff mode:** support-channels-only` in `## Human Handoff` and word informational `handoff` use cases so they only name phone, email or portal links without promising a transfer.
+
+`handoff` checks the spec, the `.agent` (including reasoning/system instructions, with a keyword heuristic in support-channels-only mode), and—when you pass `--tests`—that live handoff cases list an escalation action in `expectedActions`. With `--results`, it checks org traces for an escalation step (heuristic name match).
+
+Tag each refuse line from `## Out of Scope` with `# OOS-01`, `# OOS-02`, … on a test case. Customer-facing agents need at least one test tagged `# security` or `# prompt-injection`.

@@ -48,7 +48,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 <text class="anim label a6" x="28" y="316">Live handoff</text>
 <text class="anim cell o6" x="196" y="316">Instructions only</text>
 <path class="anim b6" d="M556 311 l4 4 l8 -9" fill="none" stroke="#3fb950" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-<text class="anim cell win b6" x="580" y="316"><tspan class="gate">handoff</tspan>: escalate or support-channels-only</text>
+<text class="anim cell win b6" x="580" y="316"><tspan class="gate">handoff</tspan>: target, instructions, trace (H1–H11)</text>
 <text class="anim label a7" x="28" y="350">The agent user</text>
 <text class="anim cell o7" x="196" y="350">A setup guide, with queries to run</text>
 <path class="anim b7" d="M556 345 l4 4 l8 -9" fill="none" stroke="#3fb950" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>

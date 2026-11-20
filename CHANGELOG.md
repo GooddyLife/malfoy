@@ -10,7 +10,8 @@ Acknowledgements: thank **Arjun Gupta** and **Mohith Kumar** for feedback on Lin
 
 ### Added
 
-- **`handoff` gate** (H1–H4). Fails when the spec promises a live transfer but the `.agent` has no `@utils.escalate`, when `**Handoff mode:** support-channels-only` still promises a transfer, or when that mode is declared while `@utils.escalate` remains wired.
+- **`handoff` gate** (H1–H4, plus H5–H11). Still fails when the spec promises a live transfer but the `.agent` has no escalation path, when `**Handoff mode:** support-channels-only` still promises a transfer, or when that mode is declared while `@utils.escalate` remains wired. Also: optional `**Escalation target:**` cross-check (H6); informational `handoff` use cases no longer force a live path; live-transfer wording in `.agent` instructions is scanned (H5/H9, heuristic); with `--tests`, live handoff use cases must list escalation in `expectedActions` (H7–H8); with `--results`, org traces must show an escalation action (H10–H11).
+- **`coverage` gate** (C8–C10). Each refuse item under `## Out of Scope` becomes `OOS-nn` and must be tagged on a test. Customer-facing agents need a live test tagged `# security` or `# prompt-injection` (C9).
 - **Messy real records in the contract.** `spec` rule S8 requires `**Messy records:**` or `**Realistic test data:**` under `## Environments` or `## Data & Privacy`. `coverage` rule C6 requires at least one test tagged `# messy-data` when that declaration exists; C7 warns when those tests omit `recordId` / `recordIds`.
 - **`## Salesforce Data Access`** in the spec (optional table). `perms --spec` checks `ObjectPermissions` and `FieldPermissions` for declared reads and edits (P9–P12). Without the section, behaviour matches 0.2.0.
 - Unit tests for every new rule, with org answers faked as before.

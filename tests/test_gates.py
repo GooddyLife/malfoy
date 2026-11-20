@@ -41,7 +41,8 @@ class GatesTest(unittest.TestCase):
         spec, agent, tests = (self.file("spec.md", SPEC), self.file("a.agent", AGENT),
                               self.file("tests.yaml", TESTS))
         for gate in (gates.gate_spec(spec), gates.gate_lint(agent, final=True),
-                     gates.gate_handoff(spec, agent), gates.gate_coverage(spec, tests)):
+                     gates.gate_handoff(spec, agent, tests),
+                     gates.gate_coverage(spec, tests, agent)):
             self.assertEqual(gate.errors + gate.warns, [], gate.name)
 
     def test_spec_missing_section_placeholder_and_guardrail(self):
@@ -78,7 +79,8 @@ class GatesTest(unittest.TestCase):
 
     def test_coverage_reports_use_case_without_test(self):
         spec = self.file("spec.md", SPEC)
-        gate = gates.gate_coverage(spec, self.file("tests.yaml", TESTS.replace("# UC-04", "#")))
+        gate = gates.gate_coverage(spec, self.file("tests.yaml", TESTS.replace("# UC-04", "#")),
+                                   self.file("a.agent", AGENT))
         self.assertEqual([msg.split("`")[1] for _, _, msg in gate.errors], ["UC-04"])
 
     def test_spec_requires_messy_record_source(self):
@@ -86,11 +88,12 @@ class GatesTest(unittest.TestCase):
         self.assertIn("S8", self.codes(gates.gate_spec(self.file("spec.md", stripped))))
 
     def test_handoff_requires_escalate_or_offline_mode(self):
-        spec, agent = self.file("spec.md", SPEC), self.file("a.agent", AGENT)
-        self.assertEqual(gates.gate_handoff(spec, agent).errors, [])
+        spec, agent, tests = (self.file("spec.md", SPEC), self.file("a.agent", AGENT),
+                              self.file("tests.yaml", TESTS))
+        self.assertEqual(gates.gate_handoff(spec, agent, tests).errors, [])
         no_esc = AGENT.replace("escalate_to_human: @utils.escalate", "# removed")
         self.assertEqual(self.codes(gates.gate_handoff(spec, self.file("b.agent", no_esc))),
-                         {"H1", "H2"})
+                         {"H1", "H2", "H6", "H9"})
         offline = SPEC.replace(
             "## Human Handoff",
             "## Human Handoff\n\n**Handoff mode:** support-channels-only", 1)
@@ -102,7 +105,9 @@ class GatesTest(unittest.TestCase):
             "On request, at any point. Also after two lookups in a row that find nothing. "
             "The chat goes\n to the Customer Care queue with the conversation attached.",
             "On request, point to the support phone line. No live transfer.", 1)
-        no_esc_path = self.file("d.agent", no_esc)
+        offline = offline.replace("**Escalation target:** `@utils.escalate`\n", "")
+        offline_agent = no_esc.replace("transfer right away.", "point to support channels.")
+        no_esc_path = self.file("d.agent", offline_agent)
         self.assertEqual(
             self.codes(gates.gate_handoff(self.file("s.md", offline), no_esc_path)), set())
         bad_agent = self.file("c.agent", AGENT)
@@ -117,21 +122,98 @@ class GatesTest(unittest.TestCase):
         self.assertIn("H4", self.codes(gates.gate_handoff(
             self.file("s3.md", promise_spec), no_esc_only)))
 
+    def test_handoff_detects_instruction_promise_without_wire(self):
+        agent = AGENT.replace("@utils.escalate", "# no escalate")
+        no_wire = self.file("nw.agent", agent)
+        self.assertIn("H9", self.codes(gates.gate_handoff(self.file("spec.md", SPEC), no_wire)))
+
+    def test_handoff_informational_use_case_does_not_require_escalate(self):
+        spec = SPEC.replace(
+            "| UC-03 | adjacent | asks to change the delivery address | say it only checks order status and offers to transfer to a person |",
+            "| UC-03 | adjacent | asks to change the delivery address | refuse address changes in one sentence |",
+            1)
+        spec = spec.replace(
+            "| UC-04 | handoff | asks for a person | transfer right away, without trying to solve it first |",
+            "| UC-04 | handoff | asks for a person | say how to reach support, without promising a transfer |",
+            1)
+        spec = spec.replace(
+            "On request, at any point. Also after two lookups in a row that find nothing. The chat goes\n"
+            "to the Customer Care queue with the conversation attached.\n\n**Escalation target:** `@utils.escalate`",
+            "On request, point to the support phone line. No live transfer.\n",
+            1)
+        agent = AGENT.replace("escalate_to_human: @utils.escalate", "# removed")
+        agent = agent.replace("transfer right away.", "point to support channels.")
+        self.assertEqual(self.codes(gates.gate_handoff(
+            self.file("s.md", spec), self.file("b.agent", agent))), set())
+
+    def test_handoff_custom_escalation_target_mismatch(self):
+        spec = SPEC.replace("**Escalation target:** `@utils.escalate`",
+                            "**Escalation target:** `flow://Wrong_Queue`", 1)
+        self.assertIn("H6", self.codes(gates.gate_handoff(
+            self.file("s.md", spec), self.file("a.agent", AGENT))))
+
+    def test_handoff_tests_must_expect_escalation(self):
+        spec, agent = self.file("spec.md", SPEC), self.file("a.agent", AGENT)
+        bad = TESTS.replace("escalate_to_human", "lookup_order", 1)
+        self.assertIn("H8", self.codes(gates.gate_handoff(spec, agent, self.file("t.yaml", bad))))
+
+    def test_handoff_org_results_without_escalation(self):
+        spec, agent, tests = (self.file("spec.md", SPEC), self.file("a.agent", AGENT),
+                              self.file("tests.yaml", TESTS))
+        results = self.file("r.json", json.dumps([{
+            "utterance": "I want to talk to a person",
+            "passed": True,
+            "actionsExecuted": ["lookup_order"],
+        }]))
+        self.assertIn("H10", self.codes(gates.gate_handoff(spec, agent, tests, results)))
+
+    def test_handoff_support_channels_heuristic_on_instructions(self):
+        offline = re.sub(
+            r"## Human Handoff\n.*?(?=\n## Data)",
+            ("## Human Handoff\n\n**Handoff mode:** support-channels-only\n\n"
+             "On request, point to the support phone line. No live transfer.\n"),
+            SPEC, count=1, flags=re.S)
+        offline = re.sub(r"\| UC-04 \| handoff \|.*\n", "", offline)
+        agent = self.file("a.agent", AGENT)  # still says transfer in system instructions
+        self.assertIn("H5", self.codes(gates.gate_handoff(self.file("s.md", offline), agent)))
+
+    def test_coverage_out_of_scope_and_security(self):
+        spec, agent = self.file("spec.md", SPEC), self.file("a.agent", AGENT)
+        tests = TESTS.replace("# OOS-01\n  # OOS-02\n", "# ")
+        self.assertIn("C8", self.codes(gates.gate_coverage(spec, self.file("t.yaml", tests), agent)))
+        lines, drop, no_sec = TESTS.splitlines(), False, []
+        for line in lines:
+            if line.strip() == "# security":
+                drop = True
+                continue
+            if drop:
+                if line.strip().startswith("# ") and "security" not in line:
+                    drop = False
+                    no_sec.append(line)
+                continue
+            no_sec.append(line)
+        no_sec = "\n".join(no_sec) + "\n"
+        self.assertIn("C9", self.codes(gates.gate_coverage(
+            spec, self.file("t2.yaml", no_sec), agent)))
+
     def test_coverage_requires_messy_data_test(self):
         spec, tests = self.file("spec.md", SPEC), self.file("tests.yaml", TESTS)
-        self.assertEqual(gates.gate_coverage(spec, tests).errors, [])
+        self.assertEqual(gates.gate_coverage(spec, tests, self.file("a.agent", AGENT)).errors, [])
         no_messy = TESTS.replace("# messy-data\n", "")
-        self.assertIn("C6", self.codes(gates.gate_coverage(spec, self.file("t.yaml", no_messy))))
+        self.assertIn("C6", self.codes(gates.gate_coverage(
+            spec, self.file("t.yaml", no_messy), self.file("a.agent", AGENT))))
 
     def test_coverage_ignores_tags_not_on_a_live_test_case(self):
         spec, untagged = self.file("spec.md", SPEC), TESTS.replace("# UC-04", "#")
         for where in ("\n  # - utterance: later  # UC-04\n",   # commented-out test case
                       "\n# UC-04 still to write\nnotes: none\n"):  # tag on no test case
-            gate = gates.gate_coverage(spec, self.file("tests.yaml", untagged + where))
+            gate = gates.gate_coverage(spec, self.file("tests.yaml", untagged + where),
+                                       self.file("a.agent", AGENT))
             self.assertIn("C3", self.codes(gate), where)
         trailing = untagged.replace('"I want to talk to a person"',
                                     '"I want to talk to a person"  # UC-04')
-        self.assertEqual(gates.gate_coverage(spec, self.file("t.yaml", trailing)).errors, [])
+        self.assertEqual(gates.gate_coverage(
+            spec, self.file("t.yaml", trailing), self.file("b.agent", AGENT)).errors, [])
 
     def test_bom_and_corrupt_json_cannot_run(self):
         root = Path(self.dir.name)

@@ -22,7 +22,8 @@ It is not a benchmark. Nothing here measures whether agents built one way fail l
 | The spec | `agentforce-generate/assets/agent-spec-template.md` has Purpose & Scope, Behavioral Intent, Subagent Posture, Subagent Map, Variables, Actions, Action Invocation Strategy, Deterministic Controls, Architecture Pattern and Agent Configuration. Searching the template and `references/agent-design-and-spec-creation.md` for `metric`, `privacy` or `pii` finds nothing | `SPEC_SECTIONS` in `gates.py`; rules S1 to S8 |
 | Tests against the spec | `agentforce-generate/SKILL.md`: "During testing, test coverage maps against it." No file maps test cases to spec entries | `gate_coverage` in `gates.py`; rules C3 and C6 |
 | Messy real records | No requirement to name a sandbox copy or test against incomplete production-shaped rows | S8 and C6 in `gates.py` |
-| Live handoff | Handoff behaviour is prose in instructions; no check that `@utils.escalate` exists | `gate_handoff` in `gates.py`; rules H1 to H4 |
+| Live handoff | Handoff behaviour is prose in instructions; no check that `@utils.escalate` exists | `gate_handoff` in `gates.py`; rules H1 to H11; optional trace checks |
+| Out of scope / security tests | Not mapped to refuse items | `gate_coverage` rules C8 to C9 |
 | The user the agent runs as | `agentforce-generate/references/agent-user-setup.md` documents `PermissionSetAssignment` queries as setup steps. `grep -rl SetupEntityAccess agentforce-*/` returns no file: nothing checks class access for that user | `gate_perms` in `gates.py`; rules P1 to P12 with optional `## Salesforce Data Access` |
 | What the compiler stays quiet about | The compiler diagnostics, plus `references/known-issues.md` and `references/production-gotchas.md` to read | `gate_lint` in `gates.py`; rules L1 to L7 |
 | "It's active" | `agentforce-generate/references/agent-access-guide.md` documents a `BotVersion` query to run | `gate_active` in `gates.py`; rules A1 to A3 |
