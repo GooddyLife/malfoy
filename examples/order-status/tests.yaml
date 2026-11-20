@@ -2,7 +2,8 @@
 # The `# UC-nn` comments tie each case to the spec; `gates.py coverage` reads them.
 # `# OOS-nn` tags tie refuse items from `## Out of Scope` to at least one test.
 # Action names are definition names, and an agent with only start_agent reports the topic
-# `topic_selector` (measured in examples/recorded-run).
+# `topic_selector` (measured in examples/recorded-run). `recordId` is read by Malfoy's gates
+# only: `sf agent test create` drops it, so the utterance must carry the record reference.
 name: "OrderStatus acceptance"
 subjectType: AGENT
 subjectName: OrderStatus
@@ -43,10 +44,10 @@ testCases:
     expectedOutcome: "Agent refuses refunds in one sentence and says it only checks order status"
 
   # UC-04
+  # Testing Center reports `@utils.escalate` as the topic `human`, with no action (measured).
   - utterance: "I want to talk to a person"
-    expectedTopic: topic_selector
-    expectedActions:
-      - escalate_to_human
+    expectedTopic: human
+    expectedActions: []
     expectedOutcome: "Agent transfers to a person without asking for order details first"
 
   # UC-05
